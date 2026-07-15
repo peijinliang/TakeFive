@@ -1,6 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import {
   isPermissionGranted,
   requestPermission,
@@ -29,6 +27,7 @@ import {
 } from "lucide-react";
 import "./App.css";
 import { I18nProvider, localeOptions, useI18n, type Locale } from "./i18n";
+import { appInvoke as invoke, appListen as listen, isTauriRuntime } from "./runtime";
 
 interface StoredReminder {
   id: string;
@@ -970,6 +969,10 @@ function SettingsPage() {
   const pause = normalizePause(pauseQuery.data);
 
   useEffect(() => {
+    if (!isTauriRuntime) {
+      setNotificationState("unavailable");
+      return;
+    }
     isPermissionGranted()
       .then((granted) => setNotificationState(granted ? "granted" : "denied"))
       .catch(() => setNotificationState("unavailable"));
@@ -997,6 +1000,11 @@ function SettingsPage() {
 
   const enableNotifications = async () => {
     setError("");
+    if (!isTauriRuntime) {
+      setNotificationState("unavailable");
+      setError(t("systemUnavailable"));
+      return;
+    }
     try {
       const permission = await requestPermission();
       const granted = permission === "granted";
@@ -1012,6 +1020,11 @@ function SettingsPage() {
     setTestingNotification(true);
     setError("");
     setMessage("");
+    if (!isTauriRuntime) {
+      setTestingNotification(false);
+      setError(t("systemUnavailable"));
+      return;
+    }
     try {
       let granted = await isPermissionGranted();
       if (!granted) {
