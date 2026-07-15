@@ -359,9 +359,11 @@ fn onboarding_status_from_parts(
         .iter()
         .any(|reminder| reminder.deleted_at_utc.is_none());
     let completed = match setting_json {
-        Some(value) => serde_json::from_str::<OnboardingSetting>(&value)
-            .map_err(|error| format!("invalid_onboarding_setting: {error}"))?
-            .completed,
+        Some(value) => {
+            serde_json::from_str::<OnboardingSetting>(value)
+                .map_err(|error| format!("invalid_onboarding_setting: {error}"))?
+                .completed
+        }
         // Existing databases predate the onboarding setting. Reminder history,
         // including deleted starter templates, means setup already happened.
         None => !reminder_history.is_empty(),
@@ -2024,6 +2026,27 @@ mod tests {
     }
 
     #[test]
+    fn legacy_reminder_history_is_treated_as_completed_onboarding() {
+        let active = stored_reminder("active");
+        let active_status = onboarding_status_from_parts(None, &[active]).unwrap();
+        assert!(active_status.completed);
+        assert!(!active_status.needs_setup);
+        assert!(active_status.has_reminders);
+
+        let mut deleted = stored_reminder("deleted");
+        deleted.deleted_at_utc = Some(200);
+        let deleted_status = onboarding_status_from_parts(None, &[deleted]).unwrap();
+        assert!(deleted_status.completed);
+        assert!(!deleted_status.needs_setup);
+        assert!(!deleted_status.has_reminders);
+
+        let fresh_status = onboarding_status_from_parts(None, &[]).unwrap();
+        assert!(!fresh_status.completed);
+        assert!(fresh_status.needs_setup);
+        assert!(!fresh_status.has_reminders);
+    }
+
+    #[test]
     fn aligned_interval_input_rejects_invalid_intervals_and_partial_or_empty_windows() {
         assert!(validate_aligned_interval_reminder_input(aligned_input(0, None, None)).is_err());
         assert!(
@@ -2074,7 +2097,10 @@ mod tests {
         let details = views[0].rule.as_ref().expect("structured rule details");
         assert_eq!(details.kind, "interval");
         assert_eq!(details.timezone, "Asia/Shanghai");
-        assert_eq!(details.weekdays, ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]);
+        assert_eq!(
+            details.weekdays,
+            ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        );
         assert_eq!(details.interval_minutes, Some(60));
         assert_eq!(details.active_window_start.as_deref(), Some("09:00"));
         assert_eq!(details.active_window_end.as_deref(), Some("18:00"));
