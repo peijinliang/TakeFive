@@ -1,0 +1,43 @@
+# Rust
+/target/
+**/target/
+
+# Node / frontend builds
+**/node_modules/
+**/dist/
+**/coverage/
+**/playwright-report/
+**/test-results/
+/.playwright-cli/
+/.playwright-mcp/
+
+# Project-local build and test output
+/artifacts/
+/output/
+
+# Local runtime data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Environment files and signing material
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Logs
+*.log
+
+# Operating systems and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

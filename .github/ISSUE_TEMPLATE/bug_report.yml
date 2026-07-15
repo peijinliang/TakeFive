@@ -1,0 +1,89 @@
+name: Bug 报告
+description: 报告可复现的错误、提醒异常或平台兼容问题
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请先移除用户名、本地路径、提醒内容、数据库数据、访问令牌等敏感信息。安全漏洞请按 `SECURITY.md` 私密报告。
+
+  - type: input
+    id: version
+    attributes:
+      label: TakeFive 版本或提交
+      description: 例如 0.1.0、提交哈希，或“本地 main 分支构建”。
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 操作系统版本、CPU 架构，以及是否使用多显示器。
+      placeholder: Windows 11 24H2, x64, 双显示器
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题范围
+      options:
+        - 提醒创建或管理
+        - 调度时间或重复提醒
+        - 桌面悬浮提示或系统通知
+        - 托盘、开机启动或窗口
+        - 休眠、唤醒、锁屏或系统时间变化
+        - 数据库或数据恢复
+        - 构建或开发环境
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 说明发生了什么，以及问题对你的影响。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 创建……
+        2. 关闭主窗口……
+        3. 等待……
+        4. 出现……
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 补充材料
+      description: 可附脱敏日志、截图或最小复现。涉及时间问题时请写明时区和系统时间变化。
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，未发现相同问题。
+          required: true
+        - label: 我已移除个人数据、令牌、签名材料和其他敏感信息。
+          required: true
+        - label: 这不是需要私密报告的安全漏洞。
+          required: true
