@@ -9,6 +9,6 @@ pub use models::{
     ClaimOutcome, InsertOccurrenceOutcome, NewOccurrence, NewPauseSession, NewReminder,
     NewReminderBundle, NewReminderPolicy, NewScheduleRule, Occurrence, OccurrenceDecisionRecord,
     OutstandingSurfaceDelivery, PauseScope, PauseSession, Reminder, ReminderChanges,
-    ScheduledReminderRecord,
+    ScheduleRuleChanges, ScheduledReminderRecord,
 };
 pub use repository::{OccurrenceRepository, PauseRepository, ReminderRepository};

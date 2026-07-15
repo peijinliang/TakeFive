@@ -52,6 +52,14 @@ pub struct NewScheduleRule {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScheduleRuleChanges {
+    pub rule_type: String,
+    pub timezone_mode: String,
+    pub timezone_id: Option<String>,
+    pub config_json: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NewReminderBundle {
     pub reminder: NewReminder,
     pub rule: Option<NewScheduleRule>,

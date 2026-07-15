@@ -5,7 +5,7 @@ use takefive_persistence_sqlite::{
     ClaimOutcome, InsertOccurrenceOutcome, NewOccurrence, NewPauseSession, NewReminder,
     NewReminderBundle, NewReminderPolicy, NewScheduleRule, OccurrenceDecisionRecord,
     OccurrenceRepository, PauseRepository, PauseScope, PersistenceError, ReminderChanges,
-    ReminderRepository, SqliteStore,
+    ReminderRepository, ScheduleRuleChanges, SqliteStore,
 };
 use tempfile::TempDir;
 use tokio::sync::Barrier;
@@ -241,6 +241,71 @@ async fn failed_configuration_write_rolls_back_the_reminder() {
 
     assert!(result.is_err());
     assert_eq!(repository.get(&reminder.id).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn configuration_update_changes_reminder_and_rule_atomically() {
+    let database = TestDatabase::new().await;
+    let repository = ReminderRepository::new(database.store.clone());
+    create_configured_reminder(&repository, "reminder-update", true, 100).await;
+
+    let updated = repository
+        .update_with_configuration(
+            "reminder-update",
+            1,
+            &ReminderChanges {
+                title: "Updated reminder".into(),
+                description: "New description".into(),
+                enabled: true,
+                updated_at_utc: 200,
+            },
+            &ScheduleRuleChanges {
+                rule_type: "fixed_times".into(),
+                timezone_mode: "named".into(),
+                timezone_id: Some("Asia/Shanghai".into()),
+                config_json: r#"{"times":["11:30"]}"#.into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(updated.title, "Updated reminder");
+    assert_eq!(updated.revision, 2);
+    let configured = repository.list_configured().await.unwrap();
+    assert_eq!(configured[0].title, "Updated reminder");
+    assert_eq!(configured[0].rule_config_json, r#"{"times":["11:30"]}"#);
+
+    let conflict = repository
+        .update_with_configuration(
+            "reminder-update",
+            1,
+            &ReminderChanges {
+                title: "Should not win".into(),
+                description: String::new(),
+                enabled: false,
+                updated_at_utc: 300,
+            },
+            &ScheduleRuleChanges {
+                rule_type: "fixed_times".into(),
+                timezone_mode: "named".into(),
+                timezone_id: Some("Asia/Shanghai".into()),
+                config_json: r#"{"times":["12:00"]}"#.into(),
+            },
+        )
+        .await;
+    assert!(matches!(
+        conflict,
+        Err(PersistenceError::RevisionConflict { .. })
+    ));
+    assert_eq!(
+        repository
+            .get("reminder-update")
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        2
+    );
 }
 
 #[tokio::test]

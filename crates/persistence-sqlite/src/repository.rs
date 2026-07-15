@@ -4,7 +4,7 @@ use crate::{
     ClaimOutcome, InsertOccurrenceOutcome, NewOccurrence, NewPauseSession, NewReminder,
     NewReminderBundle, NewReminderPolicy, NewScheduleRule, Occurrence, OccurrenceDecisionRecord,
     OutstandingSurfaceDelivery, PauseScope, PauseSession, PersistenceError, Reminder,
-    ReminderChanges, Result, ScheduledReminderRecord, SqliteStore,
+    ReminderChanges, Result, ScheduleRuleChanges, ScheduledReminderRecord, SqliteStore,
 };
 
 #[derive(Clone, Debug)]
@@ -150,6 +150,62 @@ impl ReminderRepository {
             id: id.to_owned(),
             expected_revision,
         })
+    }
+
+    pub async fn update_with_configuration(
+        &self,
+        id: &str,
+        expected_revision: i64,
+        changes: &ReminderChanges,
+        rule: &ScheduleRuleChanges,
+    ) -> Result<Reminder> {
+        let mut transaction = self.store.pool().begin().await?;
+        let updated = sqlx::query_as::<_, Reminder>(
+            "UPDATE reminders SET title = ?, description = ?, enabled = ?, \
+             updated_at_utc = ?, revision = revision + 1 \
+             WHERE id = ? AND revision = ? AND deleted_at_utc IS NULL \
+             RETURNING id, title, description, enabled, revision, created_at_utc, \
+             updated_at_utc, deleted_at_utc",
+        )
+        .bind(&changes.title)
+        .bind(&changes.description)
+        .bind(changes.enabled)
+        .bind(changes.updated_at_utc)
+        .bind(id)
+        .bind(expected_revision)
+        .fetch_optional(&mut *transaction)
+        .await?;
+
+        let Some(updated) = updated else {
+            transaction.rollback().await?;
+            return Err(PersistenceError::RevisionConflict {
+                id: id.to_owned(),
+                expected_revision,
+            });
+        };
+
+        let rule_updated = sqlx::query(
+            "UPDATE schedule_rules SET rule_type = ?, timezone_mode = ?, timezone_id = ?, \
+             config_json = ?, updated_at_utc = ? WHERE reminder_id = ?",
+        )
+        .bind(&rule.rule_type)
+        .bind(&rule.timezone_mode)
+        .bind(&rule.timezone_id)
+        .bind(&rule.config_json)
+        .bind(changes.updated_at_utc)
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+
+        if rule_updated.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Err(PersistenceError::InvariantViolation(format!(
+                "missing schedule rule for reminder {id}"
+            )));
+        }
+
+        transaction.commit().await?;
+        Ok(updated)
     }
 
     pub async fn soft_delete(&self, id: &str, deleted_at_utc: i64) -> Result<bool> {

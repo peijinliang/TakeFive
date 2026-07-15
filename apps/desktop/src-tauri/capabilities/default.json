@@ -5,6 +5,8 @@
   "windows": ["main", "reminder"],
   "permissions": [
     "core:default",
-    "notification:default"
+    "notification:default",
+    "process:allow-restart",
+    "updater:default"
   ]
 }

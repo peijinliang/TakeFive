@@ -27,9 +27,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "windows": {
       "webviewInstallMode": {
-        "type": "offlineInstaller",
+        "type": "downloadBootstrapper",
         "silent": true
       }
     },
@@ -43,5 +44,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNDRkNERUYwMDlERkY5NUIKUldSYitkOEo4Tjc4UEN5SjV2NHlUZHlHVGljNUhjcVM4MVF0SWlMVGIvNXlJa0F1ZnRDMy9SMnQK",
+      "endpoints": [
+        "https://github.com/peijinliang/TakeFive/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

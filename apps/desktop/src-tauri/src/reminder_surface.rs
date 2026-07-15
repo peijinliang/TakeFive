@@ -18,6 +18,8 @@ pub(crate) struct ReminderSurfacePayload {
     pub(crate) body: String,
     pub(crate) occurrence_id: String,
     pub(crate) scheduled_at: String,
+    #[serde(default)]
+    pub(crate) preview: bool,
 }
 
 #[derive(Clone, Default)]
@@ -68,6 +70,30 @@ impl ReminderSurfaceState {
         else {
             return Ok(QueueAdvance::Unchanged);
         };
+        queue.remove(index);
+        if index != 0 {
+            return Ok(QueueAdvance::Unchanged);
+        }
+        Ok(match queue.front().cloned() {
+            Some(next) => QueueAdvance::Next(next),
+            None => QueueAdvance::Empty,
+        })
+    }
+
+    fn advance_preview(&self, occurrence_id: &str) -> Result<QueueAdvance, String> {
+        let mut queue = self
+            .queue
+            .write()
+            .map_err(|_| "reminder_surface_payload_state_poisoned".to_string())?;
+        let Some(index) = queue
+            .iter()
+            .position(|payload| payload.occurrence_id == occurrence_id)
+        else {
+            return Ok(QueueAdvance::Unchanged);
+        };
+        if !queue[index].preview {
+            return Err("reminder_surface_not_preview".to_string());
+        }
         queue.remove(index);
         if index != 0 {
             return Ok(QueueAdvance::Unchanged);
@@ -161,6 +187,29 @@ impl ReminderSurfaceState {
             }
         }
     }
+
+    pub(crate) fn finish_preview(
+        &self,
+        app: &AppHandle,
+        occurrence_id: &str,
+    ) -> Result<(), String> {
+        let _presentation = self
+            .presentation
+            .lock()
+            .map_err(|_| "reminder_surface_presentation_state_poisoned".to_string())?;
+        match self.advance_preview(occurrence_id)? {
+            QueueAdvance::Unchanged => Ok(()),
+            QueueAdvance::Next(next) => Self::show_payload(app, next),
+            QueueAdvance::Empty => {
+                if let Some(window) = app.get_webview_window(REMINDER_SURFACE_LABEL) {
+                    window
+                        .hide()
+                        .map_err(|error| format!("reminder_surface_hide_failed: {error}"))?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 fn surface_position(app: &AppHandle) -> Option<(f64, f64)> {
@@ -194,6 +243,7 @@ mod tests {
             body: "休息一下".to_string(),
             occurrence_id: id.to_string(),
             scheduled_at: "2026-07-14T08:00:00+00:00".to_string(),
+            preview: false,
         }
     }
 
@@ -238,6 +288,43 @@ mod tests {
             state.advance("occurrence-1").unwrap(),
             QueueAdvance::Unchanged
         );
+    }
+
+    #[test]
+    fn preview_advance_cannot_remove_a_real_occurrence() {
+        let state = ReminderSurfaceState::default();
+        let real = payload("occurrence-1", "喝水");
+        assert!(state.enqueue(real.clone()).unwrap());
+
+        assert_eq!(
+            state.advance_preview("occurrence-1").unwrap_err(),
+            "reminder_surface_not_preview"
+        );
+        assert_eq!(state.latest().unwrap(), Some(real));
+    }
+
+    #[test]
+    fn preview_advance_removes_only_the_matching_preview() {
+        let state = ReminderSurfaceState::default();
+        let mut preview = payload("preview:reminder-1", "喝水");
+        preview.preview = true;
+        assert!(state.enqueue(preview.clone()).unwrap());
+
+        assert_eq!(
+            state.advance_preview(&preview.occurrence_id).unwrap(),
+            QueueAdvance::Empty
+        );
+        assert_eq!(state.latest().unwrap(), None);
+    }
+
+    #[test]
+    fn persisted_payloads_without_preview_flag_remain_real_occurrences() {
+        let payload: ReminderSurfacePayload = serde_json::from_str(
+            r#"{"title":"喝水","body":"休息一下","occurrenceId":"occurrence-1","scheduledAt":"2026-07-14T08:00:00+00:00"}"#,
+        )
+        .unwrap();
+
+        assert!(!payload.preview);
     }
 
     #[test]

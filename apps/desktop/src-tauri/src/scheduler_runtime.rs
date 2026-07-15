@@ -17,6 +17,7 @@ use tauri_plugin_notification::NotificationExt;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::reminder_settings::{ReminderSettings, REMINDER_SETTINGS_KEY};
 use crate::reminder_surface::{ReminderSurfacePayload, ReminderSurfaceState};
 
 const STARTUP_LOOKBACK_HOURS: i64 = 24;
@@ -71,6 +72,7 @@ async fn run_scheduler(
     };
     let session = SessionRuntimeState::recovering_from_startup();
     let contexts = SqliteRuntimeContextSource {
+        store: store.clone(),
         reminders: reminders.clone(),
         pauses: PauseRepository::new(store),
         session: session.clone(),
@@ -157,6 +159,7 @@ impl DeliveryPort for TauriNotificationDelivery {
             body: body.clone(),
             occurrence_id: request.occurrence_id,
             scheduled_at: request.scheduled_at_utc.to_rfc3339(),
+            preview: false,
         };
         let attempt_id = Uuid::new_v4().to_string();
         let payload_json = serde_json::to_string(&payload)
@@ -286,6 +289,7 @@ fn delivery_error(code: &str) -> DeliveryError {
 
 #[derive(Clone)]
 struct SqliteRuntimeContextSource {
+    store: SqliteStore,
     reminders: ReminderRepository,
     pauses: PauseRepository,
     session: SessionRuntimeState,
@@ -314,6 +318,13 @@ impl RuntimeContextSource for SqliteRuntimeContextSource {
             .list_active_for_reminder(&candidate.reminder_id, now_millis)
             .await
             .map_err(context_error)?;
+        let settings_json = self
+            .store
+            .get_setting_json(REMINDER_SETTINGS_KEY)
+            .await
+            .map_err(context_error)?;
+        let dnd_until =
+            quiet_until_for_context(settings_json.as_deref(), now, &candidate.timezone_id)?;
         let session = self.session.snapshot()?;
 
         Ok(RuntimeContext {
@@ -325,7 +336,7 @@ impl RuntimeContextSource for SqliteRuntimeContextSource {
             in_active_window: true,
             reminder_paused_until: active_pause_until(&reminder_pauses),
             global_paused_until: active_pause_until(&global_pauses),
-            dnd_until: None,
+            dnd_until,
             session_available: session.session_available,
             wake_cooldown_until: session.wake_cooldown_until,
             fullscreen: fullscreen_for_policy(crate::platform::probe().foreground_fullscreen),
@@ -335,6 +346,16 @@ impl RuntimeContextSource for SqliteRuntimeContextSource {
 
 fn fullscreen_for_policy(foreground_fullscreen: Option<bool>) -> bool {
     foreground_fullscreen.unwrap_or(true)
+}
+
+fn quiet_until_for_context(
+    value_json: Option<&str>,
+    now: DateTime<Utc>,
+    candidate_timezone: &str,
+) -> Result<Option<DateTime<Utc>>, SchedulerError> {
+    ReminderSettings::load(value_json, None)
+        .and_then(|settings| settings.quiet_until(now, candidate_timezone))
+        .map_err(SchedulerError::RuntimeContextSource)
 }
 
 fn context_error(error: takefive_persistence_sqlite::PersistenceError) -> SchedulerError {
@@ -571,6 +592,29 @@ mod tests {
         assert!(fullscreen_for_policy(None));
         assert!(fullscreen_for_policy(Some(true)));
         assert!(!fullscreen_for_policy(Some(false)));
+    }
+
+    #[test]
+    fn reminder_settings_feed_daily_quiet_hours_into_policy_context() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 15, 0).unwrap();
+        assert_eq!(
+            quiet_until_for_context(None, now, "UTC").unwrap(),
+            Some(Utc.with_ymd_and_hms(2026, 7, 15, 13, 30, 0).unwrap())
+        );
+
+        let disabled = r#"{
+            "autoDismissSeconds":7,
+            "quietHours":{
+                "enabled":false,
+                "startLocal":"12:00",
+                "endLocal":"13:30",
+                "timezone":"UTC"
+            }
+        }"#;
+        assert_eq!(
+            quiet_until_for_context(Some(disabled), now, "UTC").unwrap(),
+            None
+        );
     }
 
     #[test]

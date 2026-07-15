@@ -1,4 +1,5 @@
 mod platform;
+mod reminder_settings;
 mod reminder_surface;
 mod scheduler_runtime;
 
@@ -16,7 +17,7 @@ use takefive_domain::{
 use takefive_persistence_sqlite::{
     NewPauseSession, NewReminder, NewReminderBundle, NewReminderPolicy, NewScheduleRule,
     Occurrence, OccurrenceRepository, PauseRepository, PauseSession, Reminder as StoredReminder,
-    ReminderChanges, ReminderRepository, ScheduledReminderRecord, SqliteStore,
+    ReminderChanges, ReminderRepository, ScheduleRuleChanges, ScheduledReminderRecord, SqliteStore,
 };
 use tauri::{
     menu::{Menu, MenuItem},
@@ -26,9 +27,12 @@ use tauri::{
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use uuid::Uuid;
 
+use reminder_settings::{ReminderSettings, REMINDER_SETTINGS_KEY};
 use reminder_surface::{ReminderSurfacePayload, ReminderSurfaceState, REMINDER_SURFACE_LABEL};
 
 const ONBOARDING_SETTING_KEY: &str = "onboarding.v1";
+const AUTOSTART_SETTING_KEY: &str = "autostart.v1";
+const AUTOSTART_CONFIGURED_JSON: &str = r#"{"configured":true}"#;
 
 #[derive(Clone)]
 struct AppState {
@@ -103,6 +107,35 @@ struct CreateAlignedIntervalReminderInput {
     active_window_start: Option<String>,
     active_window_end: Option<String>,
     excluded_window_start: Option<String>,
+    excluded_window_end: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateReminderInput {
+    id: String,
+    expected_revision: i64,
+    name: String,
+    description: Option<String>,
+    kind: String,
+    #[serde(default)]
+    local_time: Option<String>,
+    #[serde(default)]
+    local_date_time: Option<String>,
+    #[serde(default)]
+    interval_minutes: Option<u32>,
+    #[serde(default)]
+    anchor_local_date_time: Option<String>,
+    timezone: String,
+    #[serde(default)]
+    weekdays: Vec<String>,
+    #[serde(default)]
+    active_window_start: Option<String>,
+    #[serde(default)]
+    active_window_end: Option<String>,
+    #[serde(default)]
+    excluded_window_start: Option<String>,
+    #[serde(default)]
     excluded_window_end: Option<String>,
 }
 
@@ -278,6 +311,45 @@ fn get_reminder_surface_payload(
 }
 
 #[tauri::command]
+async fn preview_reminder(
+    id: String,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    surface: tauri::State<'_, ReminderSurfaceState>,
+) -> Result<ReminderSurfacePayload, String> {
+    let reminder = state
+        .reminders
+        .get(&id)
+        .await
+        .map_err(|error| error.to_string())?
+        .filter(|reminder| reminder.deleted_at_utc.is_none())
+        .ok_or_else(|| format!("reminder_not_found: {id}"))?;
+    let body = if reminder.description.trim().is_empty() {
+        "到时间啦，别忘了照顾一下自己。".to_string()
+    } else {
+        reminder.description
+    };
+    let payload = ReminderSurfacePayload {
+        title: reminder.title,
+        body,
+        occurrence_id: format!("preview:{}", reminder.id),
+        scheduled_at: Utc::now().to_rfc3339(),
+        preview: true,
+    };
+    surface.present(&app, payload.clone())?;
+    Ok(payload)
+}
+
+#[tauri::command]
+fn dismiss_reminder_preview(
+    id: String,
+    app: AppHandle,
+    surface: tauri::State<'_, ReminderSurfaceState>,
+) -> Result<(), String> {
+    surface.finish_preview(&app, &id)
+}
+
+#[tauri::command]
 fn probe_platform() -> platform::PlatformProbe {
     platform::probe()
 }
@@ -332,6 +404,55 @@ async fn storage_status(state: tauri::State<'_, AppState>) -> Result<StorageStat
             .len(),
         database_path: state.database_path.display().to_string(),
     })
+}
+
+#[tauri::command]
+async fn get_reminder_settings(
+    timezone: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<ReminderSettings, String> {
+    load_or_initialize_reminder_settings(&state.store, timezone).await
+}
+
+async fn load_or_initialize_reminder_settings(
+    store: &SqliteStore,
+    default_timezone: Option<String>,
+) -> Result<ReminderSettings, String> {
+    let value = store
+        .get_setting_json(REMINDER_SETTINGS_KEY)
+        .await
+        .map_err(|error| error.to_string())?;
+    let settings = ReminderSettings::load(value.as_deref(), default_timezone)?;
+    if value.is_none() {
+        let serialized = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
+        store
+            .set_setting_json(
+                REMINDER_SETTINGS_KEY,
+                &serialized,
+                Utc::now().timestamp_millis(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(settings)
+}
+
+#[tauri::command]
+async fn update_reminder_settings(
+    input: ReminderSettings,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<ReminderSettings, String> {
+    let settings = input.validate()?;
+    let value = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
+    state
+        .store
+        .set_setting_json(REMINDER_SETTINGS_KEY, &value, Utc::now().timestamp_millis())
+        .await
+        .map_err(|error| error.to_string())?;
+    state.scheduler.configuration_changed();
+    let _ = app.emit("settings-changed", ());
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -550,6 +671,45 @@ async fn create_aligned_interval_reminder(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+async fn update_reminder(
+    input: UpdateReminderInput,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<ReminderView, String> {
+    let existing = state
+        .reminders
+        .get(&input.id)
+        .await
+        .map_err(|error| error.to_string())?
+        .filter(|reminder| reminder.deleted_at_utc.is_none())
+        .ok_or_else(|| format!("reminder_not_found: {}", input.id))?;
+    let (name, description, rule_changes, rule_view) =
+        update_rule_parts(&input, SystemClock.now_utc())?;
+    let updated = state
+        .reminders
+        .update_with_configuration(
+            &input.id,
+            input.expected_revision,
+            &ReminderChanges {
+                title: name,
+                description,
+                enabled: existing.enabled,
+                updated_at_utc: Utc::now().timestamp_millis(),
+            },
+            &rule_changes,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut view = ReminderView::from(updated);
+    view.rule_summary = Some(rule_view.summary);
+    view.rule = Some(rule_view.details);
+    view.next_trigger_at = rule_view.next_trigger_at;
+    state.scheduler.configuration_changed();
+    let _ = app.emit("reminders-changed", ());
+    Ok(view)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 async fn set_reminder_enabled(
     id: String,
     expected_revision: i64,
@@ -698,7 +858,11 @@ fn get_autostart_status(app: AppHandle) -> AutostartStatus {
 }
 
 #[tauri::command]
-fn set_autostart_enabled(enabled: bool, app: AppHandle) -> Result<AutostartStatus, String> {
+async fn set_autostart_enabled(
+    enabled: bool,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<AutostartStatus, String> {
     let manager = app.autolaunch();
     let result = if enabled {
         manager.enable()
@@ -709,6 +873,15 @@ fn set_autostart_enabled(enabled: bool, app: AppHandle) -> Result<AutostartStatu
 
     let status = query_autostart_status(&app);
     if status.enabled == Some(enabled) {
+        state
+            .store
+            .set_setting_json(
+                AUTOSTART_SETTING_KEY,
+                AUTOSTART_CONFIGURED_JSON,
+                Utc::now().timestamp_millis(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
         Ok(status)
     } else if let Some(error) = status.error {
         Err(error)
@@ -728,6 +901,120 @@ async fn delete_reminder(id: String, state: tauri::State<'_, AppState>) -> Resul
         state.scheduler.configuration_changed();
     }
     Ok(deleted)
+}
+
+fn update_rule_parts(
+    input: &UpdateReminderInput,
+    now: DateTime<Utc>,
+) -> Result<(String, String, ScheduleRuleChanges, RuleView), String> {
+    match input.kind.as_str() {
+        "fixed" => {
+            let validated = validate_reminder_input(CreateReminderInput {
+                name: input.name.clone(),
+                description: input.description.clone(),
+                local_time: input
+                    .local_time
+                    .clone()
+                    .ok_or_else(|| "提醒时间格式应为 HH:mm".to_string())?,
+                timezone: input.timezone.clone(),
+                weekdays: input.weekdays.clone(),
+            })?;
+            let rule = FixedTimeRule::new(
+                validated.timezone,
+                validated.weekdays.clone(),
+                vec![validated.local_time],
+            )
+            .map_err(|error| error.to_string())?;
+            let rule_view = RuleView {
+                summary: format!(
+                    "{} · {}",
+                    weekday_label(&validated.weekdays),
+                    validated.local_time.format("%H:%M")
+                ),
+                details: fixed_rule_details(
+                    validated.timezone,
+                    &validated.weekdays,
+                    &[validated.local_time],
+                ),
+                next_trigger_at: rule
+                    .next_after(now)
+                    .map(|candidate| candidate.scheduled_at_utc.to_rfc3339()),
+            };
+            Ok((
+                validated.name,
+                validated.description,
+                ScheduleRuleChanges {
+                    rule_type: "fixed_times".to_string(),
+                    timezone_mode: "named".to_string(),
+                    timezone_id: Some(validated.timezone.to_string()),
+                    config_json: serde_json::to_string(&rule).map_err(|error| error.to_string())?,
+                },
+                rule_view,
+            ))
+        }
+        "oneShot" => {
+            let validated = validate_one_shot_reminder_input(
+                CreateOneShotReminderInput {
+                    name: input.name.clone(),
+                    description: input.description.clone(),
+                    local_date_time: input
+                        .local_date_time
+                        .clone()
+                        .ok_or_else(|| "一次性提醒时间格式应为 YYYY-MM-DDTHH:mm".to_string())?,
+                    timezone: input.timezone.clone(),
+                },
+                now,
+            )?;
+            let rule = OneShotRule::new(validated.at_utc, validated.source_timezone);
+            let rule_view =
+                one_shot_rule_view_from_parts(validated.at_utc, validated.source_timezone, now);
+            Ok((
+                validated.name,
+                validated.description,
+                ScheduleRuleChanges {
+                    rule_type: "one_shot".to_string(),
+                    timezone_mode: "named".to_string(),
+                    timezone_id: Some(validated.source_timezone.to_string()),
+                    config_json: serde_json::to_string(&rule).map_err(|error| error.to_string())?,
+                },
+                rule_view,
+            ))
+        }
+        "interval" => {
+            let validated =
+                validate_aligned_interval_reminder_input(CreateAlignedIntervalReminderInput {
+                    name: input.name.clone(),
+                    description: input.description.clone(),
+                    interval_minutes: input
+                        .interval_minutes
+                        .ok_or_else(|| "间隔时长必须为 1-1440 分钟".to_string())?,
+                    anchor_local_date_time: input
+                        .anchor_local_date_time
+                        .clone()
+                        .ok_or_else(|| "锚点时间格式应为 YYYY-MM-DDTHH:mm".to_string())?,
+                    timezone: input.timezone.clone(),
+                    weekdays: input.weekdays.clone(),
+                    active_window_start: input.active_window_start.clone(),
+                    active_window_end: input.active_window_end.clone(),
+                    excluded_window_start: input.excluded_window_start.clone(),
+                    excluded_window_end: input.excluded_window_end.clone(),
+                })?;
+            let rule_view = aligned_interval_rule_view_from_rule(&validated.rule, now);
+            Ok((
+                validated.name,
+                validated.description,
+                ScheduleRuleChanges {
+                    rule_type: "aligned_interval".to_string(),
+                    timezone_mode: "named".to_string(),
+                    timezone_id: Some(validated.rule.timezone().to_string()),
+                    config_json: serde_json::to_string(&validated.rule)
+                        .map_err(|error| error.to_string())?,
+                },
+                rule_view,
+            ))
+        }
+        _ => Err("invalid_reminder_kind".to_string()),
+    }
 }
 
 fn validate_reminder_input(input: CreateReminderInput) -> Result<ValidatedReminderInput, String> {
@@ -976,6 +1263,74 @@ fn query_autostart_status(app: &AppHandle) -> AutostartStatus {
     }
 }
 
+fn should_initialize_default_autostart(configured: bool, has_existing_setup: bool) -> bool {
+    !configured && !has_existing_setup
+}
+
+async fn initialize_default_autostart(
+    app: &AppHandle,
+    store: &SqliteStore,
+    reminders: &ReminderRepository,
+) -> Result<(), String> {
+    let configured = store
+        .get_setting_json(AUTOSTART_SETTING_KEY)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_some();
+    let has_onboarding_setting = store
+        .get_setting_json(ONBOARDING_SETTING_KEY)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_some();
+    let has_reminders = !reminders
+        .list(true)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_empty();
+
+    if !should_initialize_default_autostart(configured, has_onboarding_setting || has_reminders) {
+        if !configured {
+            store
+                .set_setting_json(
+                    AUTOSTART_SETTING_KEY,
+                    AUTOSTART_CONFIGURED_JSON,
+                    Utc::now().timestamp_millis(),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
+
+    let current = query_autostart_status(app);
+    if !current.available {
+        return Err(current
+            .error
+            .unwrap_or_else(|| "autostart_unavailable".to_string()));
+    }
+    if current.enabled != Some(true) {
+        app.autolaunch()
+            .enable()
+            .map_err(|error| format!("autostart_update_unavailable: {error}"))?;
+    }
+
+    let verified = query_autostart_status(app);
+    if verified.enabled != Some(true) {
+        return Err(verified
+            .error
+            .unwrap_or_else(|| "autostart_verification_failed".to_string()));
+    }
+    store
+        .set_setting_json(
+            AUTOSTART_SETTING_KEY,
+            AUTOSTART_CONFIGURED_JSON,
+            Utc::now().timestamp_millis(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn has_minimized_startup_argument(args: &[String]) -> bool {
     args.iter().any(|argument| argument == "--minimized")
 }
@@ -1166,11 +1521,10 @@ fn aligned_interval_rule_view_from_rule(
         interval_window_details(windows);
     RuleView {
         summary: format!(
-            "{} · 每 {} 分钟 · {} · 锚点 {}",
+            "{} · 每 {} 分钟 · {}",
             weekday_label(rule.active_weekdays()),
             rule.interval_minutes(),
-            window,
-            rule.anchor_local().format("%Y-%m-%d %H:%M")
+            window
         ),
         details: ReminderRuleDetails {
             kind: "interval".to_string(),
@@ -1406,7 +1760,7 @@ async fn seed_default_health_reminders_for(
             ),
         ]
     };
-    let bundles = templates
+    let mut bundles = templates
         .into_iter()
         .enumerate()
         .map(
@@ -1452,6 +1806,48 @@ async fn seed_default_health_reminders_for(
             },
         )
         .collect::<Result<Vec<_>, _>>()?;
+
+    let (lunch_title, lunch_description) = if locale.starts_with("zh") {
+        ("点外卖", "提前点好午餐，留出午休时间")
+    } else if locale.starts_with("ja") {
+        (
+            "昼食を注文",
+            "昼食を早めに注文して、休憩時間を確保しましょう",
+        )
+    } else if locale.starts_with("es") {
+        (
+            "Pide el almuerzo",
+            "Pide el almuerzo con antelación y reserva tiempo para tu descanso",
+        )
+    } else {
+        (
+            "Order lunch",
+            "Order lunch early and leave time for your break",
+        )
+    };
+    let lunch_order_time = NaiveTime::from_hms_opt(11, 0, 0)
+        .ok_or_else(|| "invalid_default_seed_time: lunch_order".to_string())?;
+    let lunch_rule = FixedTimeRule::new(timezone, workdays.clone(), vec![lunch_order_time])
+        .map_err(|error| format!("invalid_default_lunch_rule: {error:?}"))?;
+    let lunch_config_json = serde_json::to_string(&lunch_rule)
+        .map_err(|error| format!("default_lunch_rule_serialize_failed: {error}"))?;
+    let mut lunch_reminder = NewReminder::new(
+        "default-lunch-order",
+        lunch_title,
+        now.saturating_add(bundles.len() as i64),
+    );
+    lunch_reminder.description = lunch_description.to_string();
+    bundles.push(NewReminderBundle {
+        reminder: lunch_reminder,
+        rule: Some(NewScheduleRule {
+            id: "default-lunch-order-rule".to_string(),
+            rule_type: "fixed_times".to_string(),
+            timezone_mode: "named".to_string(),
+            timezone_id: Some(timezone.to_string()),
+            config_json: lunch_config_json,
+        }),
+        policy: Some(NewReminderPolicy::defaults("default-lunch-order-policy")),
+    });
 
     reminders
         .create_many_with_configuration(&bundles)
@@ -1508,6 +1904,8 @@ pub fn run() -> Result<(), tauri::Error> {
             show_main_window(app);
         }))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
@@ -1519,9 +1917,21 @@ pub fn run() -> Result<(), tauri::Error> {
             let database_path = data_dir.join("takefive.db");
             let store = tauri::async_runtime::block_on(SqliteStore::open(&database_path))
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
+            tauri::async_runtime::block_on(load_or_initialize_reminder_settings(
+                &store,
+                iana_time_zone::get_timezone().ok(),
+            ))
+            .map_err(std::io::Error::other)?;
+            let reminders = ReminderRepository::new(store.clone());
+            if let Err(error) = tauri::async_runtime::block_on(initialize_default_autostart(
+                app.handle(),
+                &store,
+                &reminders,
+            )) {
+                eprintln!("TakeFive autostart initialization unavailable: {error}");
+            }
             let reminder_surface = ReminderSurfaceState::default();
             app.manage(reminder_surface.clone());
-            let reminders = ReminderRepository::new(store.clone());
             let scheduler =
                 scheduler_runtime::start(app.handle().clone(), store.clone(), reminder_surface);
             let occurrences = OccurrenceRepository::new(store.clone());
@@ -1576,6 +1986,10 @@ pub fn run() -> Result<(), tauri::Error> {
                     api.prevent_close();
                     let app = window.app_handle().clone();
                     match app.state::<ReminderSurfaceState>().latest().ok().flatten() {
+                        Some(payload) if payload.preview => {
+                            let surface = app.state::<ReminderSurfaceState>();
+                            let _ = surface.finish_preview(&app, &payload.occurrence_id);
+                        }
                         Some(payload) => {
                             tauri::async_runtime::spawn(dismiss_surface_as_unhandled(
                                 app,
@@ -1594,6 +2008,8 @@ pub fn run() -> Result<(), tauri::Error> {
             probe_platform,
             preview_schedule,
             storage_status,
+            get_reminder_settings,
+            update_reminder_settings,
             get_onboarding_status,
             complete_onboarding,
             initialize_default_health_reminders,
@@ -1601,6 +2017,7 @@ pub fn run() -> Result<(), tauri::Error> {
             create_reminder,
             create_one_shot_reminder,
             create_aligned_interval_reminder,
+            update_reminder,
             set_reminder_enabled,
             delete_reminder,
             complete_occurrence,
@@ -1612,7 +2029,9 @@ pub fn run() -> Result<(), tauri::Error> {
             resume_all,
             get_autostart_status,
             set_autostart_enabled,
-            get_reminder_surface_payload
+            get_reminder_surface_payload,
+            preview_reminder,
+            dismiss_reminder_preview
         ])
         .build(tauri::generate_context!())?;
 
@@ -1731,6 +2150,21 @@ mod tests {
             "takefive.exe".to_string(),
             "--minimized=false".to_string(),
         ]));
+    }
+
+    #[test]
+    fn default_autostart_only_applies_to_a_fresh_install() {
+        assert!(should_initialize_default_autostart(false, false));
+        assert!(!should_initialize_default_autostart(true, false));
+        assert!(!should_initialize_default_autostart(false, true));
+    }
+
+    #[test]
+    fn background_mode_defaults_to_foreground_when_tray_is_unavailable() {
+        let state = BackgroundModeState::default();
+        assert!(!state.tray_available());
+        state.set_tray_available(true);
+        assert!(state.tray_available());
     }
 
     #[test]
@@ -1921,7 +2355,7 @@ mod tests {
                 Utc.with_ymd_and_hms(2026, 7, 15, 1, 1, 0).unwrap(),
             )
             .summary,
-            "工作日 · 每 60 分钟 · 09:00-18:00 · 午休 12:00-13:30 · 锚点 2026-07-15 09:00"
+            "工作日 · 每 60 分钟 · 09:00-18:00 · 午休 12:00-13:30"
         );
     }
 
@@ -1935,22 +2369,59 @@ mod tests {
 
         assert!(seed_default_health_reminders(&reminders).await.unwrap());
         let seeded = reminders.list(false).await.unwrap();
-        assert_eq!(seeded.len(), 5);
+        assert_eq!(seeded.len(), 6);
         assert_eq!(
             seeded
                 .iter()
                 .map(|reminder| reminder.title.as_str())
                 .collect::<Vec<_>>(),
-            ["远望放松", "喝口水", "活动颈肩", "起身走动", "调整坐姿"]
+            [
+                "远望放松",
+                "喝口水",
+                "活动颈肩",
+                "起身走动",
+                "调整坐姿",
+                "点外卖"
+            ]
         );
-        for record in reminders.list_configured().await.unwrap() {
+        let configured = reminders.list_configured().await.unwrap();
+        assert_eq!(configured.len(), 6);
+        for record in configured
+            .iter()
+            .filter(|record| record.reminder_id.starts_with("default-health-"))
+        {
+            assert_eq!(record.rule_type, "aligned_interval");
             let rule: AlignedIntervalRule = serde_json::from_str(&record.rule_config_json).unwrap();
             assert_eq!(rule.active_weekdays().len(), 5);
             assert_eq!(rule.active_windows().len(), 2);
         }
+        let lunch_record = configured
+            .iter()
+            .find(|record| record.reminder_id == "default-lunch-order")
+            .unwrap();
+        assert_eq!(lunch_record.rule_type, "fixed_times");
+        assert_eq!(lunch_record.timezone_mode, "named");
+        assert_eq!(lunch_record.timezone_id.as_deref(), Some("Asia/Shanghai"));
+        let lunch_rule: FixedTimeRule =
+            serde_json::from_str(&lunch_record.rule_config_json).unwrap();
+        let lunch_candidate = lunch_rule
+            .next_after(Utc.with_ymd_and_hms(2026, 1, 5, 2, 0, 0).unwrap())
+            .unwrap();
+        assert_eq!(
+            lunch_candidate.planned_local.time(),
+            NaiveTime::from_hms_opt(11, 0, 0).unwrap()
+        );
+        assert_eq!(lunch_candidate.timezone, Tz::Asia__Shanghai);
+        let monday_candidate = lunch_rule
+            .next_after(Utc.with_ymd_and_hms(2026, 1, 9, 3, 1, 0).unwrap())
+            .unwrap();
+        assert_eq!(
+            monday_candidate.planned_local,
+            NaiveDateTime::parse_from_str("2026-01-12T11:00", "%Y-%m-%dT%H:%M").unwrap()
+        );
 
         assert!(!seed_default_health_reminders(&reminders).await.unwrap());
-        assert_eq!(reminders.list(false).await.unwrap().len(), 5);
+        assert_eq!(reminders.list(false).await.unwrap().len(), 6);
 
         for reminder in reminders.list(false).await.unwrap() {
             reminders
@@ -1977,13 +2448,28 @@ mod tests {
         );
 
         let created = reminders.list(false).await.unwrap();
-        assert_eq!(created.len(), 5);
+        assert_eq!(created.len(), 6);
         assert_eq!(created[0].title, "Rest your eyes");
+        assert_eq!(created[5].title, "Order lunch");
         for record in reminders.list_configured().await.unwrap() {
-            let rule: AlignedIntervalRule = serde_json::from_str(&record.rule_config_json).unwrap();
             assert_eq!(record.timezone_mode, "named");
             assert_eq!(record.timezone_id.as_deref(), Some("America/New_York"));
-            assert_eq!(rule.timezone(), Tz::America__New_York);
+            if record.rule_type == "aligned_interval" {
+                let rule: AlignedIntervalRule =
+                    serde_json::from_str(&record.rule_config_json).unwrap();
+                assert_eq!(rule.timezone(), Tz::America__New_York);
+            } else {
+                assert_eq!(record.rule_type, "fixed_times");
+                let rule: FixedTimeRule = serde_json::from_str(&record.rule_config_json).unwrap();
+                let candidate = rule
+                    .next_after(Utc.with_ymd_and_hms(2026, 1, 5, 13, 0, 0).unwrap())
+                    .unwrap();
+                assert_eq!(candidate.timezone, Tz::America__New_York);
+                assert_eq!(
+                    candidate.planned_local.time(),
+                    NaiveTime::from_hms_opt(11, 0, 0).unwrap()
+                );
+            }
         }
     }
 
@@ -2022,6 +2508,29 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn reminder_settings_are_initialized_once_with_the_system_timezone() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(directory.path().join("reminder-settings.db"))
+            .await
+            .unwrap();
+
+        let first =
+            load_or_initialize_reminder_settings(&store, Some("America/New_York".to_string()))
+                .await
+                .unwrap();
+        assert_eq!(
+            first.quiet_hours.timezone.as_deref(),
+            Some("America/New_York")
+        );
+
+        let second =
+            load_or_initialize_reminder_settings(&store, Some("Asia/Shanghai".to_string()))
+                .await
+                .unwrap();
+        assert_eq!(second, first);
     }
 
     #[test]
@@ -2087,7 +2596,7 @@ mod tests {
 
         assert_eq!(
             views[0].rule_summary.as_deref(),
-            Some("每天 · 每 60 分钟 · 09:00-18:00 · 锚点 2026-07-15 09:00")
+            Some("每天 · 每 60 分钟 · 09:00-18:00")
         );
         assert_eq!(
             views[0].next_trigger_at.as_deref(),

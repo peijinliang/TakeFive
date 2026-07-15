@@ -22,6 +22,7 @@ static LIFECYCLE_MONITOR_ERROR: OnceLock<String> = OnceLock::new();
 #[cfg(target_os = "windows")]
 static TIME_ZONE_STATE: OnceLock<Mutex<Option<TimeZoneSnapshot>>> = OnceLock::new();
 
+#[cfg(target_os = "windows")]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LifecycleEvent {
@@ -45,8 +46,8 @@ struct TimeZoneSnapshot {
     dynamic_daylight_time_disabled: bool,
 }
 
+#[cfg(target_os = "windows")]
 impl LifecycleEvent {
-    #[cfg(target_os = "windows")]
     fn observed(kind: &'static str, detail: Option<serde_json::Value>) -> Self {
         Self {
             kind,
@@ -144,6 +145,7 @@ fn start_lifecycle_monitor_inner(app: AppHandle) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(clippy::unnecessary_wraps)]
 pub fn start_lifecycle_monitor(_app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }

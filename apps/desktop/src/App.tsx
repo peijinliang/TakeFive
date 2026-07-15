@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   isPermissionGranted,
   requestPermission,
@@ -12,13 +12,17 @@ import {
   Clock3,
   Coffee,
   Database,
+  Download,
   HardDrive,
   Languages,
   LoaderCircle,
+  Moon,
   Pause,
+  Pencil,
   Play,
   Plus,
   Power,
+  RefreshCw,
   RotateCcw,
   Settings,
   Sparkles,
@@ -28,6 +32,7 @@ import {
 import "./App.css";
 import { I18nProvider, localeOptions, useI18n, type Locale } from "./i18n";
 import { appInvoke as invoke, appListen as listen, isTauriRuntime } from "./runtime";
+import { UpdateProvider, useAppUpdater } from "./updater";
 
 interface StoredReminder {
   id: string;
@@ -67,6 +72,7 @@ interface ReminderSurfacePayload {
   body: string;
   occurrenceId: string;
   scheduledAt: string;
+  preview: boolean;
 }
 
 interface AutostartStatusShape {
@@ -87,10 +93,106 @@ interface OnboardingStatusShape {
   hasReminders: boolean;
 }
 
+interface ReminderSettingsShape {
+  autoDismissSeconds: number;
+  quietHours: {
+    enabled: boolean;
+    startLocal: string;
+    endLocal: string;
+    timezone?: string | null;
+  };
+}
+
 type Tab = "reminders" | "settings";
 type ReminderRuleKind = "fixed" | "interval" | "oneShot";
 type RepeatMode = "workdays" | "daily";
 type NotificationState = "checking" | "granted" | "denied" | "unavailable";
+
+type ThemeStyle = "pulse" | "nocturne" | "studio";
+type ThemeAccent = "mint" | "violet" | "coral" | "sky";
+type ThemeBackground = "solid" | "mesh" | "grid";
+
+interface ThemeSettingsShape {
+  style: ThemeStyle;
+  accent: ThemeAccent;
+  background: ThemeBackground;
+}
+
+const THEME_STORAGE_KEY = "takefive.theme";
+const defaultThemeSettings: ThemeSettingsShape = {
+  style: "pulse",
+  accent: "mint",
+  background: "grid",
+};
+
+const styleOptions: Array<{ value: ThemeStyle; labelKey: "stylePulse" | "styleNocturne" | "styleStudio" }> = [
+  { value: "pulse", labelKey: "stylePulse" },
+  { value: "nocturne", labelKey: "styleNocturne" },
+  { value: "studio", labelKey: "styleStudio" },
+];
+const accentOptions: Array<{ value: ThemeAccent; labelKey: "accentMint" | "accentViolet" | "accentCoral" | "accentSky" }> = [
+  { value: "mint", labelKey: "accentMint" },
+  { value: "violet", labelKey: "accentViolet" },
+  { value: "coral", labelKey: "accentCoral" },
+  { value: "sky", labelKey: "accentSky" },
+];
+const backgroundOptions: Array<{ value: ThemeBackground; labelKey: "backgroundSolid" | "backgroundMesh" | "backgroundGrid" }> = [
+  { value: "solid", labelKey: "backgroundSolid" },
+  { value: "mesh", labelKey: "backgroundMesh" },
+  { value: "grid", labelKey: "backgroundGrid" },
+];
+
+function readThemeSettings(): ThemeSettingsShape {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(THEME_STORAGE_KEY) ?? "null") as Partial<ThemeSettingsShape> | null;
+    return {
+      style: value?.style === "pulse" || value?.style === "nocturne" || value?.style === "studio"
+        ? value.style
+        : defaultThemeSettings.style,
+      accent: value?.accent === "mint" || value?.accent === "violet" || value?.accent === "coral" || value?.accent === "sky"
+        ? value.accent
+        : defaultThemeSettings.accent,
+      background: value?.background === "solid" || value?.background === "mesh" || value?.background === "grid"
+        ? value.background
+        : defaultThemeSettings.background,
+    };
+  } catch {
+    return defaultThemeSettings;
+  }
+}
+
+type ThemeContextValue = {
+  settings: ThemeSettingsShape;
+  setSettings: (next: Partial<ThemeSettingsShape>) => void;
+};
+
+const ThemeContext = createContext<ThemeContextValue | null>(null);
+
+function ThemeProvider({ children }: { children: ReactNode }) {
+  const [settings, setSettingsState] = useState<ThemeSettingsShape>(readThemeSettings);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.themeStyle = settings.style;
+    root.dataset.themeAccent = settings.accent;
+    root.dataset.themeBackground = settings.background;
+    root.style.colorScheme = settings.style === "nocturne" ? "dark" : "light";
+    window.localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify(settings));
+  }, [settings]);
+
+  const value = useMemo<ThemeContextValue>(() => ({
+    settings,
+    setSettings: (next) => setSettingsState((current) => ({ ...current, ...next })),
+  }), [settings]);
+
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
+}
+
+function useTheme() {
+  const value = useContext(ThemeContext);
+  if (!value) throw new Error("useTheme must be used inside ThemeProvider");
+  return value;
+}
 interface ReminderDraft {
   name: string;
   timezone: string;
@@ -110,13 +212,37 @@ interface ReminderDraft {
 
 const WORKDAYS = ["mon", "tue", "wed", "thu", "fri"];
 const EVERY_DAY = [...WORKDAYS, "sat", "sun"];
-const SURFACE_AUTO_DISMISS_MS = 60_000;
+const SURFACE_AUTO_DISMISS_MS = 7_000;
+
+function defaultReminderSettings(): ReminderSettingsShape {
+  return {
+    autoDismissSeconds: 7,
+    quietHours: {
+      enabled: true,
+      startLocal: "12:00",
+      endLocal: "13:30",
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+    },
+  };
+}
 
 function localDateTimeAfter(minutes: number) {
   const date = new Date(Date.now() + minutes * 60_000);
   date.setSeconds(0, 0);
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function localDateTimeAt(localTime: string, timezone?: string) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date()).map((part) => [part.type, part.value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day}T${localTime}`;
 }
 
 function createDraft(): ReminderDraft {
@@ -129,13 +255,39 @@ function createDraft(): ReminderDraft {
     repeatMode: "workdays",
     oneShotLocalDateTime: localDateTimeAfter(30),
     intervalMinutes: "60",
-    anchorLocalDateTime: localDateTimeAfter(0),
+    anchorLocalDateTime: localDateTimeAt("09:00", timezone),
     hasActiveWindow: true,
     activeWindowStart: "09:00",
     activeWindowEnd: "18:00",
     hasLunchBreak: true,
     lunchBreakStart: "12:00",
     lunchBreakEnd: "13:30",
+  };
+}
+
+function createDraftFromReminder(reminder: StoredReminder): ReminderDraft {
+  const fallback = createDraft();
+  const rule = reminder.rule;
+  if (!rule) return { ...fallback, name: reminder.name };
+  const kind: ReminderRuleKind = rule.kind === "interval" || rule.kind === "oneShot"
+    ? rule.kind
+    : "fixed";
+  return {
+    ...fallback,
+    name: reminder.name,
+    timezone: rule.timezone || fallback.timezone,
+    kind,
+    localTime: rule.times[0] ?? fallback.localTime,
+    repeatMode: rule.weekdays.length === 7 ? "daily" : "workdays",
+    oneShotLocalDateTime: rule.localDateTime ?? fallback.oneShotLocalDateTime,
+    intervalMinutes: String(rule.intervalMinutes ?? fallback.intervalMinutes),
+    anchorLocalDateTime: rule.anchorLocalDateTime ?? fallback.anchorLocalDateTime,
+    hasActiveWindow: Boolean(rule.activeWindowStart && rule.activeWindowEnd),
+    activeWindowStart: rule.activeWindowStart ?? fallback.activeWindowStart,
+    activeWindowEnd: rule.activeWindowEnd ?? fallback.activeWindowEnd,
+    hasLunchBreak: Boolean(rule.excludedWindowStart && rule.excludedWindowEnd),
+    lunchBreakStart: rule.excludedWindowStart ?? fallback.lunchBreakStart,
+    lunchBreakEnd: rule.excludedWindowEnd ?? fallback.lunchBreakEnd,
   };
 }
 
@@ -233,6 +385,11 @@ function readableError(error: unknown, t: ReturnType<typeof useI18n>["t"]) {
     system_notification_failed: t("notificationPermissionOff"),
   };
   if (known[message]) return known[message];
+  if (message.includes("reminder revision conflict")) return t("revisionConflict");
+  if (message === "auto_dismiss_seconds_out_of_range") return t("autoDismissRange");
+  if (message === "quiet_hours_start_equals_end") return t("quietHoursSameTime");
+  if (message === "invalid_quiet_hours_time") return t("invalidLocalTime");
+  if (message === "invalid_quiet_hours_timezone") return t("invalidTimezone");
   if (message.startsWith("无法识别时区") || message === "invalid_timezone") return t("invalidTimezone");
   if (message.includes("提醒时间格式") || message.includes("时间格式应为 HH:mm")) return t("invalidLocalTime");
   if (message.includes("一次性提醒时间必须晚于当前时间")) return t("oneShotPast");
@@ -327,8 +484,7 @@ function formatRuleSummary(
       })
       : t("activeWindowSummary", { start: rule.activeWindowStart, end: rule.activeWindowEnd });
   }
-  const anchor = formatRuleLocalDateTime(rule.anchorLocalDateTime, rule.timezone, locale, t("waitingCalculation"));
-  return `${weekdays} · ${interval} · ${window} · ${t("anchorSummary", { time: anchor })}`;
+  return `${weekdays} · ${interval} · ${window}`;
 }
 
 function ReminderSurface() {
@@ -337,10 +493,11 @@ function ReminderSurface() {
   const [loading, setLoading] = useState(true);
   const [dismissing, setDismissing] = useState(false);
   const [error, setError] = useState("");
+  const [autoDismissMs, setAutoDismissMs] = useState(SURFACE_AUTO_DISMISS_MS);
   const dismissingId = useRef<string | null>(null);
 
   const performAction = useCallback(async (
-    command: "complete_occurrence" | "skip_occurrence" | "snooze_occurrence" | "mark_occurrence_unhandled",
+    command: "complete_occurrence" | "skip_occurrence" | "snooze_occurrence" | "mark_occurrence_unhandled" | "dismiss_reminder_preview",
     occurrenceId: string,
     arguments_: Record<string, unknown> = {},
   ) => {
@@ -362,9 +519,46 @@ function ReminderSurface() {
     }
   }, [t]);
 
-  const dismiss = useCallback((occurrenceId: string) => (
-    performAction("mark_occurrence_unhandled", occurrenceId)
+  const dismiss = useCallback((current: ReminderSurfacePayload) => (
+    performAction(
+      current.preview ? "dismiss_reminder_preview" : "mark_occurrence_unhandled",
+      current.occurrenceId,
+    )
   ), [performAction]);
+
+  const performReminderAction = useCallback((
+    command: "complete_occurrence" | "skip_occurrence" | "snooze_occurrence",
+    current: ReminderSurfacePayload,
+    arguments_: Record<string, unknown> = {},
+  ) => performAction(
+    current.preview ? "dismiss_reminder_preview" : command,
+    current.occurrenceId,
+    current.preview ? {} : arguments_,
+  ), [performAction]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    const refresh = () => invoke<ReminderSettingsShape>("get_reminder_settings", { timezone })
+      .then((settings) => {
+        if (!disposed) setAutoDismissMs(settings.autoDismissSeconds * 1_000);
+      })
+      .catch(() => {
+        if (!disposed) setAutoDismissMs(SURFACE_AUTO_DISMISS_MS);
+      });
+    void refresh();
+    void listen("settings-changed", () => {
+      void refresh();
+    }).then((disposeListener) => {
+      if (disposed) disposeListener();
+      else unlisten = disposeListener;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     document.documentElement.classList.add("surface-document");
@@ -410,15 +604,14 @@ function ReminderSurface() {
 
   useEffect(() => {
     if (!payload) return undefined;
-    const occurrenceId = payload.occurrenceId;
     const timer = window.setTimeout(() => {
-      void dismiss(occurrenceId);
-    }, SURFACE_AUTO_DISMISS_MS);
+      void dismiss(payload);
+    }, autoDismissMs);
 
     return () => {
       window.clearTimeout(timer);
     };
-  }, [dismiss, payload]);
+  }, [autoDismissMs, dismiss, payload]);
 
   return (
     <main
@@ -442,12 +635,12 @@ function ReminderSurface() {
             title={t("dismiss")}
             aria-label={t("dismiss")}
             disabled={dismissing}
-            onClick={() => void dismiss(payload.occurrenceId)}
+            onClick={() => void dismiss(payload)}
           >
             <X size={15} />
           </button>
           <div className="surface-meta">
-            <span>{t("teaReminder")}</span>
+            <span>{payload.preview ? t("previewLabel") : t("teaReminder")}</span>
             <time>{formatDateTime(payload.scheduledAt, locale, t("waitingCalculation"))}</time>
           </div>
           <h1 id="surface-title">{payload.title}</h1>
@@ -456,7 +649,7 @@ function ReminderSurface() {
             <button
               type="button"
               disabled={dismissing}
-              onClick={() => void performAction("complete_occurrence", payload.occurrenceId)}
+              onClick={() => void performReminderAction("complete_occurrence", payload)}
             >
               <Check size={14} />{t("complete")}
             </button>
@@ -464,14 +657,14 @@ function ReminderSurface() {
               type="button"
               disabled={dismissing}
               title={t("snoozeMinutes", { value: 10 })}
-              onClick={() => void performAction("snooze_occurrence", payload.occurrenceId, { minutes: 10 })}
+              onClick={() => void performReminderAction("snooze_occurrence", payload, { minutes: 10 })}
             >
               <Clock3 size={14} />{t("snooze")}
             </button>
             <button
               type="button"
               disabled={dismissing}
-              onClick={() => void performAction("skip_occurrence", payload.occurrenceId)}
+              onClick={() => void performReminderAction("skip_occurrence", payload)}
             >
               <X size={14} />{t("skip")}
             </button>
@@ -483,7 +676,13 @@ function ReminderSurface() {
           <span>{loading ? t("loadingReminder") : error}</span>
         </div>
       )}
-      {payload && <span className="surface-progress" aria-hidden="true" />}
+      {payload && (
+        <span
+          className="surface-progress"
+          aria-hidden="true"
+          style={{ animationDuration: `${autoDismissMs}ms` }}
+        />
+      )}
     </main>
   );
 }
@@ -514,16 +713,19 @@ function Toggle({
 }
 
 function ReminderEditor({
+  reminder,
   onClose,
-  onCreated,
+  onSaved,
 }: {
+  reminder: StoredReminder | null;
   onClose: () => void;
-  onCreated: () => Promise<void>;
+  onSaved: () => Promise<void>;
 }) {
   const { t } = useI18n();
-  const [draft, setDraft] = useState(createDraft);
+  const [draft, setDraft] = useState(() => reminder ? createDraftFromReminder(reminder) : createDraft());
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const isEditing = reminder !== null;
 
   const update = <K extends keyof ReminderDraft>(key: K, value: ReminderDraft[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -573,11 +775,17 @@ function ReminderEditor({
       };
     } else {
       const intervalMinutes = Number(draft.intervalMinutes);
+      const intervalAnchor = reminder?.rule?.kind === "interval" && reminder.rule.anchorLocalDateTime
+        ? reminder.rule.anchorLocalDateTime
+        : localDateTimeAt(
+          draft.hasActiveWindow ? draft.activeWindowStart : localDateTimeAfter(0).slice(11),
+          timezone,
+        );
       if (!Number.isInteger(intervalMinutes) || intervalMinutes < 1 || intervalMinutes > 1440) {
         setError(t("intervalRange"));
         return;
       }
-      if (zonedDateTimeToTimestamp(draft.anchorLocalDateTime, timezone) === null) {
+      if (zonedDateTimeToTimestamp(intervalAnchor, timezone) === null) {
         setError(t("invalidAnchor"));
         return;
       }
@@ -603,9 +811,9 @@ function ReminderEditor({
       command = "create_aligned_interval_reminder";
       input = {
         name,
-        description: null,
+        description: reminder?.description || null,
         intervalMinutes,
-        anchorLocalDateTime: draft.anchorLocalDateTime,
+        anchorLocalDateTime: intervalAnchor,
         timezone,
         weekdays: draft.repeatMode === "workdays" ? WORKDAYS : EVERY_DAY,
         activeWindowStart: draft.hasActiveWindow ? draft.activeWindowStart : null,
@@ -617,8 +825,18 @@ function ReminderEditor({
 
     setSaving(true);
     try {
-      await invoke(command, { input });
-      await onCreated();
+      await invoke(isEditing ? "update_reminder" : command, {
+        input: isEditing
+          ? {
+            ...input,
+            id: reminder.id,
+            expectedRevision: reminder.revision,
+            kind: draft.kind,
+            description: reminder.description || null,
+          }
+          : input,
+      });
+      await onSaved();
       onClose();
     } catch (reason) {
       setError(readableError(reason, t));
@@ -631,8 +849,8 @@ function ReminderEditor({
     <aside className="editor-pane" aria-labelledby="editor-title">
       <div className="editor-heading">
         <div>
-          <span className="eyebrow">{t("newReminder")}</span>
-          <h2 id="editor-title">{t("scheduleTime")}</h2>
+          <span className="eyebrow">{isEditing ? t("editingReminder") : t("newReminder")}</span>
+          <h2 id="editor-title">{isEditing ? reminder.name : t("scheduleTime")}</h2>
         </div>
         <button className="icon-button" type="button" title={t("close")} onClick={onClose}>
           <X size={18} />
@@ -705,29 +923,18 @@ function ReminderEditor({
 
         {draft.kind === "interval" && (
           <>
-            <div className="interval-fields full-span">
-              <label className="field">
-                <span>{t("intervalMinutes")}</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={1440}
-                  step={1}
-                  required
-                  value={draft.intervalMinutes}
-                  onChange={(event) => update("intervalMinutes", event.target.value)}
-                />
-              </label>
-              <label className="field">
-                <span>{t("alignedAnchor")}</span>
-                <input
-                  type="datetime-local"
-                  required
-                  value={draft.anchorLocalDateTime}
-                  onChange={(event) => update("anchorLocalDateTime", event.target.value)}
-                />
-              </label>
-            </div>
+            <label className="field full-span">
+              <span>{t("intervalMinutes")}</span>
+              <input
+                type="number"
+                min={1}
+                max={1440}
+                step={1}
+                required
+                value={draft.intervalMinutes}
+                onChange={(event) => update("intervalMinutes", event.target.value)}
+              />
+            </label>
             <fieldset className="field full-span">
               <legend>{t("repeat")}</legend>
               <div className="segmented">
@@ -799,7 +1006,7 @@ function ReminderEditor({
           <button className="button ghost" type="button" onClick={onClose}>{t("cancel")}</button>
           <button className="button primary" type="submit" disabled={saving}>
             {saving ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />}
-            {t("saveReminder")}
+            {isEditing ? t("saveChanges") : t("saveReminder")}
           </button>
         </div>
       </form>
@@ -811,6 +1018,7 @@ function RemindersPage() {
   const { locale, t } = useI18n();
   const queryClient = useQueryClient();
   const [editorOpen, setEditorOpen] = useState(false);
+  const [editingReminder, setEditingReminder] = useState<StoredReminder | null>(null);
   const [rowError, setRowError] = useState("");
   const remindersQuery = useQuery({
     queryKey: ["reminders"],
@@ -840,6 +1048,24 @@ function RemindersPage() {
     },
     onError: (reason) => setRowError(readableError(reason, t)),
   });
+  const previewReminder = useMutation({
+    mutationFn: (id: string) => invoke<ReminderSurfacePayload>("preview_reminder", { id }),
+    onSuccess: () => setRowError(""),
+    onError: (reason) => setRowError(readableError(reason, t)),
+  });
+
+  const openNewReminder = () => {
+    setEditingReminder(null);
+    setEditorOpen(true);
+  };
+  const openReminderEditor = (reminder: StoredReminder) => {
+    setEditingReminder(reminder);
+    setEditorOpen(true);
+  };
+  const closeEditor = () => {
+    setEditorOpen(false);
+    setEditingReminder(null);
+  };
 
   return (
     <div className={`reminders-layout ${editorOpen ? "with-editor" : ""}`}>
@@ -849,7 +1075,7 @@ function RemindersPage() {
             <span className="eyebrow">{t("reminderCount", { count: remindersQuery.data?.length ?? 0 })}</span>
             <h1 id="reminders-title">{t("navReminders")}</h1>
           </div>
-          <button className="button primary" type="button" onClick={() => setEditorOpen(true)}>
+          <button className="button primary" type="button" onClick={openNewReminder}>
             <Plus size={18} />{t("newReminder")}
           </button>
         </div>
@@ -872,7 +1098,7 @@ function RemindersPage() {
           <div className="empty-state">
             <span className="empty-icon"><Bell size={28} /></span>
             <h2>{t("noReminders")}</h2>
-            <button className="button secondary" type="button" onClick={() => setEditorOpen(true)}>
+            <button className="button secondary" type="button" onClick={openNewReminder}>
               <Plus size={17} />{t("newReminder")}
             </button>
           </div>
@@ -882,6 +1108,7 @@ function RemindersPage() {
             {remindersQuery.data.map((reminder) => {
               const toggling = setEnabled.isPending && setEnabled.variables?.reminder.id === reminder.id;
               const deleting = deleteReminder.isPending && deleteReminder.variables === reminder.id;
+              const previewing = previewReminder.isPending && previewReminder.variables === reminder.id;
               return (
                 <article className={`reminder-row ${reminder.enabled ? "" : "disabled"}`} key={reminder.id}>
                   <span className="rule-icon" aria-hidden="true">
@@ -898,12 +1125,32 @@ function RemindersPage() {
                     <strong>{reminder.enabled ? formatDateTime(reminder.nextTriggerAt, locale, t("waitingCalculation")) : t("disabled")}</strong>
                   </div>
                   <div className="row-actions">
+                    <button
+                      className="icon-button edit"
+                      type="button"
+                      title={t("editReminder", { name: reminder.name })}
+                      aria-label={t("editReminder", { name: reminder.name })}
+                      disabled={previewReminder.isPending || deleteReminder.isPending || setEnabled.isPending}
+                      onClick={() => openReminderEditor(reminder)}
+                    >
+                      <Pencil size={16} />
+                    </button>
+                    <button
+                      className="icon-button preview"
+                      type="button"
+                      title={t("previewReminder", { name: reminder.name })}
+                      aria-label={t("previewReminder", { name: reminder.name })}
+                      disabled={previewReminder.isPending || deleteReminder.isPending || setEnabled.isPending}
+                      onClick={() => previewReminder.mutate(reminder.id)}
+                    >
+                      {previewing ? <LoaderCircle className="spin" size={17} /> : <Play size={17} />}
+                    </button>
                     {toggling
                       ? <LoaderCircle className="spin row-loader" size={17} />
                       : (
                         <Toggle
                           checked={reminder.enabled}
-                          disabled={setEnabled.isPending || deleteReminder.isPending}
+                          disabled={setEnabled.isPending || deleteReminder.isPending || previewReminder.isPending}
                           label={reminder.enabled ? t("disable", { name: reminder.name }) : t("enable", { name: reminder.name })}
                           onChange={(enabled) => setEnabled.mutate({ reminder, enabled })}
                         />
@@ -912,7 +1159,7 @@ function RemindersPage() {
                       className="icon-button danger"
                       type="button"
                       title={t("delete", { name: reminder.name })}
-                      disabled={deleteReminder.isPending || setEnabled.isPending}
+                      disabled={deleteReminder.isPending || setEnabled.isPending || previewReminder.isPending}
                       onClick={() => deleteReminder.mutate(reminder.id)}
                     >
                       {deleting ? <LoaderCircle className="spin" size={17} /> : <Trash2 size={17} />}
@@ -927,8 +1174,10 @@ function RemindersPage() {
 
       {editorOpen && (
         <ReminderEditor
-          onClose={() => setEditorOpen(false)}
-          onCreated={async () => {
+          key={editingReminder?.id ?? "new-reminder"}
+          reminder={editingReminder}
+          onClose={closeEditor}
+          onSaved={async () => {
             await Promise.all([
               refresh(),
               queryClient.invalidateQueries({ queryKey: ["storage-status"] }),
@@ -942,11 +1191,14 @@ function RemindersPage() {
 
 function SettingsPage() {
   const { locale, setLocale, t } = useI18n();
+  const { settings: themeSettings, setSettings: setThemeSettings } = useTheme();
+  const updater = useAppUpdater();
   const queryClient = useQueryClient();
   const [notificationState, setNotificationState] = useState<NotificationState>("checking");
   const [testingNotification, setTestingNotification] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [reminderSettings, setReminderSettings] = useState(defaultReminderSettings);
 
   const autostartQuery = useQuery({
     queryKey: ["autostart"],
@@ -964,9 +1216,38 @@ function SettingsPage() {
     queryFn: () => invoke<StorageStatus>("storage_status"),
     retry: false,
   });
+  const reminderSettingsQuery = useQuery({
+    queryKey: ["reminder-settings"],
+    queryFn: () => invoke<ReminderSettingsShape>("get_reminder_settings", {
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+    }),
+    retry: false,
+  });
 
   const autostart = normalizeAutostart(autostartQuery.data);
   const pause = normalizePause(pauseQuery.data);
+  const updateBusy = ["checking", "downloading", "installing", "restarting"].includes(updater.phase);
+  const updateStatus = !updater.supported
+    ? t("updatesInstalledOnly")
+    : updater.phase === "checking"
+      ? t("checkingForUpdates")
+      : updater.phase === "upToDate"
+        ? t("upToDate")
+        : updater.phase === "available" && updater.availableUpdate
+          ? t("updateAvailable", { version: updater.availableUpdate.version })
+          : updater.phase === "downloading"
+            ? updater.progressPercent === null
+              ? t("downloadingUpdate")
+              : t("updateProgress", { progress: updater.progressPercent })
+            : updater.phase === "installing"
+              ? t("installingUpdate")
+              : updater.phase === "restarting"
+                ? t("restartingUpdate")
+                : t("updatesDescription");
+
+  useEffect(() => {
+    if (reminderSettingsQuery.data) setReminderSettings(reminderSettingsQuery.data);
+  }, [reminderSettingsQuery.data]);
 
   useEffect(() => {
     if (!isTauriRuntime) {
@@ -997,6 +1278,48 @@ function SettingsPage() {
     },
     onError: (reason) => setError(readableError(reason, t)),
   });
+  const saveReminderSettings = useMutation({
+    mutationFn: (settings: ReminderSettingsShape) => invoke<ReminderSettingsShape>(
+      "update_reminder_settings",
+      { input: settings },
+    ),
+    onSuccess: async (settings) => {
+      setError("");
+      setMessage(t("reminderSettingsSaved"));
+      setReminderSettings(settings);
+      await queryClient.invalidateQueries({ queryKey: ["reminder-settings"] });
+    },
+    onError: (reason) => setError(readableError(reason, t)),
+  });
+
+  const submitReminderSettings = (event: React.FormEvent) => {
+    event.preventDefault();
+    setError("");
+    if (
+      reminderSettings.autoDismissSeconds < 1
+      || reminderSettings.autoDismissSeconds > 60
+    ) {
+      setError(t("autoDismissRange"));
+      return;
+    }
+    if (reminderSettings.quietHours.startLocal === reminderSettings.quietHours.endLocal) {
+      setError(t("quietHoursSameTime"));
+      return;
+    }
+    saveReminderSettings.mutate({
+      ...reminderSettings,
+      quietHours: {
+        ...reminderSettings.quietHours,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+      },
+    });
+  };
+
+  const updateTheme = (next: Partial<ThemeSettingsShape>) => {
+    setThemeSettings(next);
+    setError("");
+    setMessage(t("themeSaved"));
+  };
 
   const enableNotifications = async () => {
     setError("");
@@ -1056,6 +1379,87 @@ function SettingsPage() {
         </p>
       )}
 
+      <div className="settings-section appearance-section">
+        <div className="appearance-heading">
+          <div>
+            <h2>{t("appearance")}</h2>
+            <p>{t("appearanceDescription")}</p>
+          </div>
+          <span className="theme-status"><Check size={13} />{t("themeSaved")}</span>
+        </div>
+        <div className="theme-control-grid">
+          <fieldset className="theme-control style-control">
+            <legend>{t("style")}</legend>
+            <div className="theme-option-grid">
+              {styleOptions.map((option) => (
+                <label className={`theme-option ${themeSettings.style === option.value ? "selected" : ""}`} key={option.value}>
+                  <input
+                    type="radio"
+                    name="theme-style"
+                    value={option.value}
+                    checked={themeSettings.style === option.value}
+                    onChange={() => updateTheme({ style: option.value })}
+                  />
+                  <span className={`style-preview style-${option.value}`} aria-hidden="true">
+                    <span />
+                    <i />
+                    <b />
+                  </span>
+                  <strong>{t(option.labelKey)}</strong>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
+          <fieldset className="theme-control">
+            <legend>{t("accentColor")}</legend>
+            <div className="accent-option-grid">
+              {accentOptions.map((option) => (
+                <label className={`accent-option ${themeSettings.accent === option.value ? "selected" : ""}`} key={option.value}>
+                  <input
+                    type="radio"
+                    name="theme-accent"
+                    value={option.value}
+                    checked={themeSettings.accent === option.value}
+                    onChange={() => updateTheme({ accent: option.value })}
+                  />
+                  <span className={`accent-swatch accent-${option.value}`} aria-hidden="true" />
+                  <span>{t(option.labelKey)}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
+          <fieldset className="theme-control background-control">
+            <legend>{t("backgroundStyle")}</legend>
+            <div className="background-option-grid">
+              {backgroundOptions.map((option) => (
+                <label className={`background-option background-${option.value} ${themeSettings.background === option.value ? "selected" : ""}`} key={option.value}>
+                  <input
+                    type="radio"
+                    name="theme-background"
+                    value={option.value}
+                    checked={themeSettings.background === option.value}
+                    onChange={() => updateTheme({ background: option.value })}
+                  />
+                  <span aria-hidden="true" />
+                  <strong>{t(option.labelKey)}</strong>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
+          <div className="theme-preview" aria-hidden="true">
+            <div className="theme-preview-topline"><span /><span /><span /></div>
+            <div className="theme-preview-body">
+              <span className="theme-preview-mark"><Coffee size={15} /></span>
+              <div><b>{t("appName")}</b><small>{t("themePreview")}</small></div>
+              <span className="theme-preview-accent" />
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div className="settings-section language-section">
         <h2>{t("language")}</h2>
         <div className="setting-row language-row">
@@ -1080,26 +1484,11 @@ function SettingsPage() {
 
       <div className="settings-section">
         <h2>{t("notifications")}</h2>
-        <div className="setting-row">
-          <span className="setting-icon"><Bell size={19} /></span>
-          <div className="setting-copy">
-            <strong>{t("systemNotifications")}</strong>
-            <span>{notificationState === "granted" ? t("allowed") : notificationState === "checking" ? t("checking") : t("notAllowed")}</span>
-          </div>
-          <div className="setting-actions">
-            {notificationState !== "granted" && (
-              <button className="button secondary compact" type="button" onClick={() => void enableNotifications()}>{t("enableAction")}</button>
-            )}
-            <button className="button secondary compact" type="button" disabled={testingNotification} onClick={() => void testNotification()}>
-              {testingNotification ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}
-              {t("test")}
-            </button>
-          </div>
-        </div>
         <div className="setting-row pause-row">
           <span className={`setting-icon ${pause.active ? "paused" : ""}`}><Pause size={19} /></span>
           <div className="setting-copy">
             <strong>{t("allReminders")}</strong>
+            <span>{t("allRemindersDescription")}</span>
             <span>{pause.active ? t("pausedUntil", { time: formatDateTime(pause.endsAt, locale, t("waitingCalculation")) }) : t("runningNormally")}</span>
           </div>
           <div className="setting-actions pause-actions">
@@ -1129,6 +1518,95 @@ function SettingsPage() {
         </div>
       </div>
 
+      <form className="settings-section reminder-behavior-section" onSubmit={submitReminderSettings}>
+        <h2>{t("reminderBehavior")}</h2>
+        <div className="setting-row">
+          <span className="setting-icon"><Clock3 size={19} /></span>
+          <div className="setting-copy">
+            <strong>{t("autoDismiss")}</strong>
+            <span>{t("autoDismissDescription")}</span>
+          </div>
+          <label className="duration-setting">
+            <input
+              type="number"
+              min={1}
+              max={60}
+              step={1}
+              required
+              value={reminderSettings.autoDismissSeconds}
+              aria-label={t("autoDismiss")}
+              onChange={(event) => setReminderSettings((current) => ({
+                ...current,
+                autoDismissSeconds: Number(event.target.value),
+              }))}
+            />
+            <span>{t("secondsUnit")}</span>
+          </label>
+        </div>
+        <div className="setting-row quiet-hours-row">
+          <span className={`setting-icon ${reminderSettings.quietHours.enabled ? "quiet" : ""}`}>
+            <Moon size={19} />
+          </span>
+          <div className="setting-copy">
+            <strong>{t("quietHours")}</strong>
+            <span>{t("quietHoursDescription", {
+              start: reminderSettings.quietHours.startLocal,
+              end: reminderSettings.quietHours.endLocal,
+            })}</span>
+          </div>
+          <Toggle
+            checked={reminderSettings.quietHours.enabled}
+            disabled={reminderSettingsQuery.isLoading || saveReminderSettings.isPending}
+            label={t("quietHours")}
+            onChange={(enabled) => setReminderSettings((current) => ({
+              ...current,
+              quietHours: { ...current.quietHours, enabled },
+            }))}
+          />
+          {reminderSettings.quietHours.enabled && (
+            <div className="quiet-time-fields">
+              <label>
+                <span>{t("quietStart")}</span>
+                <input
+                  type="time"
+                  required
+                  value={reminderSettings.quietHours.startLocal}
+                  onChange={(event) => setReminderSettings((current) => ({
+                    ...current,
+                    quietHours: { ...current.quietHours, startLocal: event.target.value },
+                  }))}
+                />
+              </label>
+              <span aria-hidden="true">-</span>
+              <label>
+                <span>{t("quietEnd")}</span>
+                <input
+                  type="time"
+                  required
+                  value={reminderSettings.quietHours.endLocal}
+                  onChange={(event) => setReminderSettings((current) => ({
+                    ...current,
+                    quietHours: { ...current.quietHours, endLocal: event.target.value },
+                  }))}
+                />
+              </label>
+            </div>
+          )}
+        </div>
+        <div className="settings-form-actions">
+          <button
+            className="button primary compact"
+            type="submit"
+            disabled={reminderSettingsQuery.isLoading || saveReminderSettings.isPending}
+          >
+            {saveReminderSettings.isPending
+              ? <LoaderCircle className="spin" size={15} />
+              : <Check size={15} />}
+            {t("saveSettings")}
+          </button>
+        </div>
+      </form>
+
       <div className="settings-section">
         <h2>{t("application")}</h2>
         <div className="setting-row">
@@ -1156,6 +1634,78 @@ function SettingsPage() {
         </div>
       </div>
 
+      <div className="settings-section update-section">
+        <h2>{t("updates")}</h2>
+        <div className="setting-row update-row">
+          <span className="setting-icon"><RefreshCw size={19} /></span>
+          <div className="setting-copy">
+            <strong>{t("appUpdates")}</strong>
+            <span>
+              {updater.currentVersion
+                ? t("currentVersion", { version: updater.currentVersion })
+                : t("versionUnavailable")}
+            </span>
+            <span
+              className={updater.error ? "update-error" : undefined}
+              title={updater.error ?? undefined}
+            >
+              {updater.error ? t("updateFailed") : updateStatus}
+            </span>
+          </div>
+          <div className="setting-actions">
+            {updater.availableUpdate ? (
+              <button
+                className="button primary compact"
+                type="button"
+                disabled={!updater.supported || updateBusy}
+                onClick={() => void updater.installUpdate()}
+              >
+                {updateBusy
+                  ? <LoaderCircle className="spin" size={15} />
+                  : <Download size={15} />}
+                {updater.phase === "downloading"
+                  ? t("downloadingUpdate")
+                  : updater.phase === "installing"
+                    ? t("installingUpdate")
+                    : updater.phase === "restarting"
+                      ? t("restartingUpdate")
+                      : t("installUpdate")}
+              </button>
+            ) : (
+              <button
+                className="button secondary compact"
+                type="button"
+                disabled={!updater.supported || updateBusy}
+                onClick={() => void updater.checkForUpdate()}
+              >
+                {updater.phase === "checking"
+                  ? <LoaderCircle className="spin" size={15} />
+                  : <RefreshCw size={15} />}
+                {updater.phase === "checking" ? t("checkingForUpdates") : t("checkForUpdates")}
+              </button>
+            )}
+          </div>
+        </div>
+        {updater.phase === "downloading" && (
+          <div
+            className={`update-progress ${updater.progressPercent === null ? "indeterminate" : ""}`}
+            role="progressbar"
+            aria-label={t("downloadingUpdate")}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={updater.progressPercent ?? undefined}
+          >
+            <span style={updater.progressPercent === null ? undefined : { width: `${updater.progressPercent}%` }} />
+          </div>
+        )}
+        {updater.availableUpdate?.body && (
+          <div className="update-notes">
+            <strong>{t("releaseNotes")}</strong>
+            <p>{updater.availableUpdate.body}</p>
+          </div>
+        )}
+      </div>
+
       <div className="settings-section">
         <h2>{t("localData")}</h2>
         <div className="setting-row">
@@ -1173,6 +1723,42 @@ function SettingsPage() {
           {storageQuery.data?.healthy
             ? <CheckCircle2 className="healthy-icon" size={19} aria-label={t("dataHealthy", { count: storageQuery.data?.reminderCount ?? 0 })} />
             : <span className="status-dot" title={t("unknownStatus")} />}
+        </div>
+      </div>
+
+      <div className="settings-section notification-section">
+        <h2>{t("systemNotifications")}</h2>
+        <div className="setting-row">
+          <span className="setting-icon"><Bell size={19} /></span>
+          <div className="setting-copy">
+            <strong>{t("systemNotifications")}</strong>
+            <span>{t("systemNotificationsDescription")}</span>
+            <span>
+              {notificationState === "granted"
+                ? t("allowed")
+                : notificationState === "checking"
+                  ? t("checking")
+                  : notificationState === "unavailable"
+                    ? t("systemUnavailable")
+                    : t("notAllowed")}
+            </span>
+          </div>
+          <div className="setting-actions">
+            {notificationState === "denied" && (
+              <button className="button secondary compact" type="button" onClick={() => void enableNotifications()}>
+                {t("enableAction")}
+              </button>
+            )}
+            <button
+              className="button secondary compact"
+              type="button"
+              disabled={notificationState === "unavailable" || testingNotification}
+              onClick={() => void testNotification()}
+            >
+              {testingNotification ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}
+              {t("test")}
+            </button>
+          </div>
         </div>
       </div>
     </section>
@@ -1232,6 +1818,7 @@ function OnboardingPage({ onComplete }: { onComplete: () => void }) {
 
 function MainApplication() {
   const { t } = useI18n();
+  const updater = useAppUpdater();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<Tab>("reminders");
   const onboardingQuery = useQuery({
@@ -1299,6 +1886,18 @@ function MainApplication() {
       </header>
 
       <div className="app-content">
+        {updater.phase === "available" && updater.availableUpdate && (
+          <div className="update-banner" role="status">
+            <span className="update-banner-icon"><Download size={18} /></span>
+            <div>
+              <strong>{t("updateAvailable", { version: updater.availableUpdate.version })}</strong>
+              <span>{t("updateReadyDescription")}</span>
+            </div>
+            <button className="button primary compact" type="button" onClick={() => setActiveTab("settings")}>
+              <Download size={15} />{t("viewUpdate")}
+            </button>
+          </div>
+        )}
         {activeTab === "reminders" ? <RemindersPage /> : <SettingsPage />}
       </div>
     </main>
@@ -1311,9 +1910,15 @@ function App() {
     [],
   );
   return (
-    <I18nProvider>
-      {isReminderSurface ? <ReminderSurface /> : <MainApplication />}
-    </I18nProvider>
+    <ThemeProvider>
+      <I18nProvider>
+        {isReminderSurface ? (
+          <ReminderSurface />
+        ) : (
+          <UpdateProvider><MainApplication /></UpdateProvider>
+        )}
+      </I18nProvider>
+    </ThemeProvider>
   );
 }
 
