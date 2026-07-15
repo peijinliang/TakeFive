@@ -231,6 +231,49 @@ mod tests {
     }
 
     #[test]
+    fn named_timezone_keeps_local_wall_clock_time_across_travel_and_dst() {
+        let rule = FixedTimeRule::new(
+            chrono_tz::America::New_York,
+            vec![Weekday::Mon],
+            vec![NaiveTime::from_hms_opt(9, 0, 0).unwrap()],
+        )
+        .unwrap();
+        let before_us_dst_change = Utc.with_ymd_and_hms(2026, 3, 6, 14, 1, 0).unwrap();
+
+        let next = rule.next_after(before_us_dst_change).unwrap();
+
+        assert_eq!(next.planned_local.weekday(), Weekday::Mon);
+        assert_eq!(
+            next.planned_local.time(),
+            NaiveTime::from_hms_opt(9, 0, 0).unwrap()
+        );
+        assert_eq!(
+            next.scheduled_at_utc,
+            Utc.with_ymd_and_hms(2026, 3, 9, 13, 0, 0).unwrap()
+        );
+        assert_eq!(next.timezone, chrono_tz::America::New_York);
+    }
+
+    #[test]
+    fn weekday_is_evaluated_in_the_rule_timezone_near_utc_midnight() {
+        let rule = FixedTimeRule::new(
+            chrono_tz::Asia::Tokyo,
+            vec![Weekday::Mon],
+            vec![NaiveTime::from_hms_opt(0, 30, 0).unwrap()],
+        )
+        .unwrap();
+        let sunday_utc = Utc.with_ymd_and_hms(2026, 7, 19, 14, 0, 0).unwrap();
+
+        let next = rule.next_after(sunday_utc).unwrap();
+
+        assert_eq!(next.planned_local.weekday(), Weekday::Mon);
+        assert_eq!(
+            next.scheduled_at_utc,
+            Utc.with_ymd_and_hms(2026, 7, 19, 15, 30, 0).unwrap()
+        );
+    }
+
+    #[test]
     fn spring_dst_gap_moves_to_first_valid_instant() {
         let rule = FixedTimeRule::new(
             chrono_tz::America::New_York,
