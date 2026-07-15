@@ -1228,7 +1228,6 @@ fn format_active_window(window: &ActiveWindow) -> String {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 async fn seed_default_health_reminders(reminders: &ReminderRepository) -> Result<bool, String> {
     seed_default_health_reminders_for(reminders, Tz::Asia__Shanghai, "zh-CN").await
 }
