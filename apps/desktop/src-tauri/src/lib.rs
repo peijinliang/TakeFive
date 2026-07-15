@@ -338,20 +338,34 @@ async fn storage_status(state: tauri::State<'_, AppState>) -> Result<StorageStat
 async fn get_onboarding_status(
     state: tauri::State<'_, AppState>,
 ) -> Result<OnboardingStatus, String> {
-    let completed = state
+    let setting_json = state
         .store
         .get_setting_json(ONBOARDING_SETTING_KEY)
         .await
-        .map_err(|error| error.to_string())?
-        .and_then(|value| serde_json::from_str::<OnboardingSetting>(&value).ok())
-        .map(|setting| setting.completed)
-        .unwrap_or(false);
-    let has_reminders = !state
+        .map_err(|error| error.to_string())?;
+    let reminder_history = state
         .reminders
-        .list(false)
+        .list(true)
         .await
-        .map_err(|error| error.to_string())?
-        .is_empty();
+        .map_err(|error| error.to_string())?;
+    onboarding_status_from_parts(setting_json.as_deref(), &reminder_history)
+}
+
+fn onboarding_status_from_parts(
+    setting_json: Option<&str>,
+    reminder_history: &[StoredReminder],
+) -> Result<OnboardingStatus, String> {
+    let has_reminders = reminder_history
+        .iter()
+        .any(|reminder| reminder.deleted_at_utc.is_none());
+    let completed = match setting_json {
+        Some(value) => serde_json::from_str::<OnboardingSetting>(&value)
+            .map_err(|error| format!("invalid_onboarding_setting: {error}"))?
+            .completed,
+        // Existing databases predate the onboarding setting. Reminder history,
+        // including deleted starter templates, means setup already happened.
+        None => !reminder_history.is_empty(),
+    };
 
     Ok(OnboardingStatus {
         completed,
@@ -1211,6 +1225,8 @@ fn format_active_window(window: &ActiveWindow) -> String {
     )
 }
 
+#[cfg(test)]
+#[cfg(test)]
 async fn seed_default_health_reminders(reminders: &ReminderRepository) -> Result<bool, String> {
     seed_default_health_reminders_for(reminders, Tz::Asia__Shanghai, "zh-CN").await
 }
@@ -1945,6 +1961,68 @@ mod tests {
         assert!(reminders.list(false).await.unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn explicit_health_template_uses_the_selected_locale_and_named_timezone() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(directory.path().join("localized-seed.db"))
+            .await
+            .unwrap();
+        let reminders = ReminderRepository::new(store);
+
+        assert!(
+            seed_default_health_reminders_for(&reminders, Tz::America__New_York, "en-US",)
+                .await
+                .unwrap()
+        );
+
+        let created = reminders.list(false).await.unwrap();
+        assert_eq!(created.len(), 5);
+        assert_eq!(created[0].title, "Rest your eyes");
+        for record in reminders.list_configured().await.unwrap() {
+            let rule: AlignedIntervalRule = serde_json::from_str(&record.rule_config_json).unwrap();
+            assert_eq!(record.timezone_mode, "named");
+            assert_eq!(record.timezone_id.as_deref(), Some("America/New_York"));
+            assert_eq!(rule.timezone(), Tz::America__New_York);
+        }
+    }
+
+    #[tokio::test]
+    async fn onboarding_completion_setting_persists_without_creating_a_reminder() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("onboarding.db");
+        let store = SqliteStore::open(&path).await.unwrap();
+
+        assert!(store
+            .get_setting_json(ONBOARDING_SETTING_KEY)
+            .await
+            .unwrap()
+            .is_none());
+        store
+            .set_setting_json(ONBOARDING_SETTING_KEY, r#"{"completed":true}"#, 100)
+            .await
+            .unwrap();
+        assert!(store
+            .set_setting_json("invalid", "not-json", 100)
+            .await
+            .is_err());
+        store.close().await;
+
+        let reopened = SqliteStore::open(path).await.unwrap();
+        assert_eq!(
+            reopened
+                .get_setting_json(ONBOARDING_SETTING_KEY)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(r#"{"completed":true}"#)
+        );
+        assert!(ReminderRepository::new(reopened)
+            .list(false)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
     #[test]
     fn aligned_interval_input_rejects_invalid_intervals_and_partial_or_empty_windows() {
         assert!(validate_aligned_interval_reminder_input(aligned_input(0, None, None)).is_err());
@@ -1993,6 +2071,13 @@ mod tests {
             views[0].next_trigger_at.as_deref(),
             Some("2026-07-15T02:00:00+00:00")
         );
+        let details = views[0].rule.as_ref().expect("structured rule details");
+        assert_eq!(details.kind, "interval");
+        assert_eq!(details.timezone, "Asia/Shanghai");
+        assert_eq!(details.weekdays, ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]);
+        assert_eq!(details.interval_minutes, Some(60));
+        assert_eq!(details.active_window_start.as_deref(), Some("09:00"));
+        assert_eq!(details.active_window_end.as_deref(), Some("18:00"));
     }
 
     #[test]
@@ -2045,6 +2130,10 @@ mod tests {
 
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].rule_summary.as_deref(), Some("工作日 · 10:30"));
+        let details = views[0].rule.as_ref().expect("structured rule details");
+        assert_eq!(details.kind, "fixed");
+        assert_eq!(details.weekdays, ["mon", "tue", "wed", "thu", "fri"]);
+        assert_eq!(details.times, ["10:30"]);
         assert_eq!(
             views[0].next_trigger_at.as_deref(),
             Some("2026-07-20T02:30:00+00:00")
@@ -2075,6 +2164,10 @@ mod tests {
             views[0].next_trigger_at.as_deref(),
             Some("2026-07-15T01:30:00+00:00")
         );
+        let details = views[0].rule.as_ref().expect("structured rule details");
+        assert_eq!(details.kind, "oneShot");
+        assert_eq!(details.timezone, "Asia/Shanghai");
+        assert_eq!(details.local_date_time.as_deref(), Some("2026-07-15T09:30"));
 
         let expired =
             merge_reminder_views(vec![stored_reminder("reminder-1")], vec![scheduled], at);

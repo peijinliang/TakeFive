@@ -82,6 +82,12 @@ interface PauseStatusShape {
   activeSessionIds: string[];
 }
 
+interface OnboardingStatusShape {
+  completed: boolean;
+  needsSetup: boolean;
+  hasReminders: boolean;
+}
+
 type Tab = "reminders" | "settings";
 type ReminderRuleKind = "fixed" | "interval" | "oneShot";
 type RepeatMode = "workdays" | "daily";
@@ -105,7 +111,7 @@ interface ReminderDraft {
 
 const WORKDAYS = ["mon", "tue", "wed", "thu", "fri"];
 const EVERY_DAY = [...WORKDAYS, "sat", "sun"];
-const SURFACE_AUTO_DISMISS_MS = 8_000;
+const SURFACE_AUTO_DISMISS_MS = 60_000;
 
 function localDateTimeAfter(minutes: number) {
   const date = new Date(Date.now() + minutes * 60_000);
@@ -334,24 +340,32 @@ function ReminderSurface() {
   const [error, setError] = useState("");
   const dismissingId = useRef<string | null>(null);
 
-  const dismiss = useCallback(async (occurrenceId: string) => {
+  const performAction = useCallback(async (
+    command: "complete_occurrence" | "skip_occurrence" | "snooze_occurrence" | "mark_occurrence_unhandled",
+    occurrenceId: string,
+    arguments_: Record<string, unknown> = {},
+  ) => {
     if (dismissingId.current === occurrenceId) return;
     dismissingId.current = occurrenceId;
     setDismissing(true);
     setError("");
 
-    await new Promise((resolve) => window.setTimeout(resolve, 140));
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
     try {
-      await invoke("mark_occurrence_unhandled", { id: occurrenceId });
+      await invoke(command, { id: occurrenceId, ...arguments_ });
     } catch (reason) {
       const message = String(reason);
       if (!message.includes("occurrence_action_conflict") && !message.includes("occurrence_not_found")) {
-        setError(t("dismissFailed"));
+        setError(t("actionFailed"));
         setDismissing(false);
       }
       dismissingId.current = null;
     }
   }, [t]);
+
+  const dismiss = useCallback((occurrenceId: string) => (
+    performAction("mark_occurrence_unhandled", occurrenceId)
+  ), [performAction]);
 
   useEffect(() => {
     document.documentElement.classList.add("surface-document");
@@ -401,12 +415,9 @@ function ReminderSurface() {
     const timer = window.setTimeout(() => {
       void dismiss(occurrenceId);
     }, SURFACE_AUTO_DISMISS_MS);
-    const dismissOnKey = () => void dismiss(occurrenceId);
-    window.addEventListener("keydown", dismissOnKey);
 
     return () => {
       window.clearTimeout(timer);
-      window.removeEventListener("keydown", dismissOnKey);
     };
   }, [dismiss, payload]);
 
@@ -414,10 +425,10 @@ function ReminderSurface() {
     <main
       key={payload?.occurrenceId ?? "surface-loading"}
       className={`surface-shell ${dismissing ? "leaving" : ""}`}
-      role="status"
-      aria-live="assertive"
+      role={payload ? "dialog" : "status"}
+      aria-live="polite"
       aria-atomic="true"
-      onPointerDown={() => payload && void dismiss(payload.occurrenceId)}
+      aria-labelledby={payload ? "surface-title" : undefined}
     >
       <span className="surface-mascot" aria-hidden="true">
         <Coffee size={23} strokeWidth={2.2} />
@@ -426,12 +437,46 @@ function ReminderSurface() {
 
       {payload ? (
         <section className="surface-message" aria-labelledby="surface-title">
+          <button
+            className="surface-dismiss"
+            type="button"
+            title={t("dismiss")}
+            aria-label={t("dismiss")}
+            disabled={dismissing}
+            onClick={() => void dismiss(payload.occurrenceId)}
+          >
+            <X size={15} />
+          </button>
           <div className="surface-meta">
             <span>{t("teaReminder")}</span>
             <time>{formatDateTime(payload.scheduledAt, locale, t("waitingCalculation"))}</time>
           </div>
           <h1 id="surface-title">{payload.title}</h1>
           <p>{error || localizeSurfaceBody(payload.body, t)}</p>
+          <div className="surface-actions" aria-label={t("reminderActions")}>
+            <button
+              type="button"
+              disabled={dismissing}
+              onClick={() => void performAction("complete_occurrence", payload.occurrenceId)}
+            >
+              <Check size={14} />{t("complete")}
+            </button>
+            <button
+              type="button"
+              disabled={dismissing}
+              title={t("snoozeMinutes", { value: 10 })}
+              onClick={() => void performAction("snooze_occurrence", payload.occurrenceId, { minutes: 10 })}
+            >
+              <Clock3 size={14} />{t("snooze")}
+            </button>
+            <button
+              type="button"
+              disabled={dismissing}
+              onClick={() => void performAction("skip_occurrence", payload.occurrenceId)}
+            >
+              <X size={14} />{t("skip")}
+            </button>
+          </div>
         </section>
       ) : (
         <div className="surface-loading">
@@ -1121,10 +1166,66 @@ function SettingsPage() {
   );
 }
 
+function OnboardingPage({ onComplete }: { onComplete: () => void }) {
+  const { locale, t } = useI18n();
+  const [error, setError] = useState("");
+  const setup = useMutation({
+    mutationFn: async (initialize: boolean) => {
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+      if (initialize) {
+        return invoke<OnboardingStatusShape>("initialize_default_health_reminders", {
+          input: { timezone, locale },
+        });
+      }
+      return invoke<OnboardingStatusShape>("complete_onboarding");
+    },
+    onSuccess: () => {
+      setError("");
+      onComplete();
+    },
+    onError: (reason) => setError(readableError(reason, t)),
+  });
+
+  return (
+    <section className="onboarding-page" aria-labelledby="onboarding-title">
+      <div className="onboarding-mark" aria-hidden="true"><Coffee size={24} /></div>
+      <span className="eyebrow">{t("welcome")}</span>
+      <h1 id="onboarding-title">{t("onboardingTitle")}</h1>
+      <p>{t("welcomeDescription")}</p>
+      <p className="onboarding-detail">{t("onboardingDescription")}</p>
+      <div className="onboarding-actions">
+        <button
+          className="button primary"
+          type="button"
+          disabled={setup.isPending}
+          onClick={() => setup.mutate(true)}
+        >
+          {setup.isPending ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />}
+          {t("onboardingEnableReminders")}
+        </button>
+        <button
+          className="button ghost"
+          type="button"
+          disabled={setup.isPending}
+          onClick={() => setup.mutate(false)}
+        >
+          {t("skipOnboarding")}
+        </button>
+      </div>
+      {error && <p className="form-error" role="alert">{error}</p>}
+    </section>
+  );
+}
+
 function MainApplication() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<Tab>("reminders");
+  const onboardingQuery = useQuery({
+    queryKey: ["onboarding-status"],
+    queryFn: () => invoke<OnboardingStatusShape>("get_onboarding_status"),
+    retry: false,
+  });
 
   useEffect(() => {
     let disposed = false;
@@ -1143,6 +1244,18 @@ function MainApplication() {
       cleanups.forEach((cleanup) => cleanup());
     };
   }, [queryClient]);
+
+  if (onboardingQuery.data?.needsSetup && !onboardingQuery.data.hasReminders) {
+    return (
+      <main className="app-shell">
+        <OnboardingPage onComplete={() => {
+          void queryClient.invalidateQueries({ queryKey: ["onboarding-status"] });
+          void queryClient.invalidateQueries({ queryKey: ["reminders"] });
+          void queryClient.invalidateQueries({ queryKey: ["storage-status"] });
+        }} />
+      </main>
+    );
+  }
 
   return (
     <main className="app-shell">
