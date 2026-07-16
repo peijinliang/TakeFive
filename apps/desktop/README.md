@@ -1,6 +1,6 @@
 # TakeFive Desktop
 
-这里是“摸个鱼 · TakeFive”的桌面应用入口，包含 React/TypeScript 界面和 Tauri 2 主进程。项目总览、功能状态与架构说明请从[仓库根 README](../../README.md)开始阅读。
+这里是“摸个鱼 · TakeFive”的桌面应用入口，包含 React/TypeScript 界面和 Tauri 2 主进程。我们希望它在你忙得忘记喝水、活动和收尾时，给出一句克制而善意的提醒，而不是再添一份必须完成的任务。项目总览、功能状态与这份朴素的初衷，请从[仓库根 README](../../README.md)开始阅读。
 
 ## 本地运行
 

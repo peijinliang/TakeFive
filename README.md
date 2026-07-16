@@ -1,6 +1,6 @@
 # TakeFive — Quiet reminders for healthier workdays
 
-> A local-first desktop companion for people who spend long hours at a screen. Set a rhythm for water, eye breaks, movement, focus sessions, and the end of the workday — then let TakeFive keep time quietly in the background.
+> A local-first desktop companion for people who spend long hours at a screen. It does not ask you to become more productive. It simply remembers the glass of water, the view beyond the screen, a little movement, a proper meal, and the time to call it a day.
 
 <p align="center">
   <a href="README.md"><strong>English</strong></a> ·
@@ -27,26 +27,34 @@
 
 ## The idea
 
-Most reminder apps make you manage the reminder instead of your day. TakeFive is designed around a calmer promise: configure a rule once, see exactly what happens next, and keep working without a notification storm.
+Most reminder apps make you manage the reminder instead of caring for your day. TakeFive is designed around a calmer promise: configure a rule once, see exactly what happens next, and carry on without a notification storm.
 
-### Built for the rituals that keep developers well
+### A small note from the people making it
+
+TakeFive began with a very ordinary concern. People who care about their work often sit down for far too long. The water goes cold, shoulders tighten, meals get pushed aside, and daylight disappears before anyone notices.
+
+We are not building another scorecard for your life. There are no moral victories in a perfect streak, and no failure in snoozing or skipping a reminder. Looking after yourself should not become one more source of pressure. We only hope TakeFive can be a quiet, kind presence that remembers the small things when work takes all your attention.
+
+Software cannot fix every kind of tiredness. But if it helps one person drink another glass of water, rest their eyes, or close the laptop a little earlier, it has done something worthwhile. We hope you do good work, live a full life, and stay safe and well.
+
+### A healthier rhythm for everyone who cares about their work
 
 | Use case | What TakeFive can do today | The direction we are exploring |
 | --- | --- | --- |
 | **Eye-break rhythm** | Create a 45- or 60-minute aligned reminder with copy that nudges you to look away and rest. | A ready-made 20-20-20 preset with optional semi-transparent or full-screen break surfaces. |
 | **Stand, stretch, hydrate** | Schedule recurring prompts for water, movement, or a custom habit; pause them for a meeting or deep-focus block. | Built-in 30-second, 1-minute, and 3-minute movement cards. |
-| **Sleep boundary** | Add a one-shot “wrap up” reminder for the end of a workday. | A bedtime countdown and a gentle “tonight, no late-night coding” mode. |
+| **A time to wrap up** | Add a one-shot “wrap up” reminder for the end of a workday. | A bedtime countdown and a gentle “call it a night” mode. |
 | **Caffeine check-in** | Keep all reminder data local and create a simple caffeine check-in rule. | A local caffeine log with a transparent estimate of possible sleep impact. |
 | **Pomodoro with care** | Combine aligned intervals, quiet hours, and reminder copy that makes a short pause feel natural. | A dedicated focus mode that suggests water, movement, or one minute away from the screen. |
 | **Lightweight self-checks** | Deliver low-friction distance, breathing, or “look away for 20 seconds” prompts as ordinary reminders. | Optional eye-fatigue check cards, clearly positioned as self-management rather than medical advice. |
-| **Workday review** | Persist reminder events and explain scheduler outcomes in local storage. | A weekly review of focus time, late nights, skipped breaks, and hydration habits. |
+| **A kinder weekly look-back** | Persist reminder events and explain scheduler outcomes in local storage. | A weekly view of focus time, late nights, skipped breaks, and hydration habits, without a discipline score. |
 | **Quiet desktop companion** | Run from the tray, stay offline, and keep working after the main window closes. | Offline breathing exercises, white noise, and small end-of-day reflection cards. |
 
 The table is intentionally honest: the left column describes the current product foundation; the right column is a product direction, not a promise that those features already ship.
 
 ## Why it feels different
 
-- **Gentle by default.** A bottom-right floating surface does not steal focus. It auto-dismisses after 7 seconds by default and supports complete, snooze, skip, and dismiss actions.
+- **Caring, never demanding.** A bottom-right floating surface does not steal focus. It auto-dismisses after 7 seconds by default and supports complete, snooze, skip, and dismiss actions, without making a missed break feel like failure.
 - **Reliable in the background.** The Rust scheduler owns authoritative timing; the app does not depend on a browser tab or a front-end `setTimeout`.
 - **Recovery-aware.** After startup, sleep/wake, lock/unlock, system-time, or timezone changes, TakeFive reconciles from SQLite instead of replaying a backlog of stale notifications.
 - **Private by design.** No account, cloud service, telemetry, keyboard contents, window titles, screen capture, microphone, camera, or mouse tracking.

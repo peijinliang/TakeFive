@@ -29,6 +29,12 @@
 
 La mayoría de las apps de recordatorios te obligan a administrar el recordatorio en vez de tu día. TakeFive propone algo más sereno: configura una regla una vez, mira cuándo ocurrirá la próxima, y sigue trabajando sin una tormenta de notificaciones.
 
+### Una nota de quienes lo hacemos
+
+Quien se toma en serio su trabajo suele olvidar el agua, la vista, el movimiento y hasta la hora de terminar. TakeFive no quiere puntuar tu salud ni convertir una racha perfecta en otra obligación. Puedes posponer o saltarte un aviso: cuidarte no debería ser una nueva fuente de culpa.
+
+El software no puede resolver todo el cansancio de la vida. Pero si ayuda a alguien a beber otro vaso de agua, descansar los ojos o cerrar el portátil un poco antes, ya habrá valido la pena. Ojalá hagas un buen trabajo y, sobre todo, estés bien.
+
 ### Pequeños hábitos para desarrolladores
 
 | Situación | Lo que puedes hacer hoy | Dirección que estamos explorando |
