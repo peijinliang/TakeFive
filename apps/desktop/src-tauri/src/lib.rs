@@ -27,7 +27,7 @@ use tauri::{
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use uuid::Uuid;
 
-use reminder_settings::{ReminderSettings, REMINDER_SETTINGS_KEY};
+use reminder_settings::{ReminderSettings, DEFAULT_APP_DISPLAY_NAME, REMINDER_SETTINGS_KEY};
 use reminder_surface::{ReminderSurfacePayload, ReminderSurfaceState, REMINDER_SURFACE_LABEL};
 
 const ONBOARDING_SETTING_KEY: &str = "onboarding.v1";
@@ -442,6 +442,7 @@ async fn update_reminder_settings(
     input: ReminderSettings,
     app: AppHandle,
     state: tauri::State<'_, AppState>,
+    surface: tauri::State<'_, ReminderSurfaceState>,
 ) -> Result<ReminderSettings, String> {
     let settings = input.validate()?;
     let value = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
@@ -450,6 +451,10 @@ async fn update_reminder_settings(
         .set_setting_json(REMINDER_SETTINGS_KEY, &value, Utc::now().timestamp_millis())
         .await
         .map_err(|error| error.to_string())?;
+    surface.set_display_name(&settings.app_display_name)?;
+    if let Err(error) = apply_native_display_name(&app, &settings.app_display_name) {
+        eprintln!("TakeFive display name sync unavailable: {error}");
+    }
     state.scheduler.configuration_changed();
     let _ = app.emit("settings-changed", ());
     Ok(settings)
@@ -1609,10 +1614,6 @@ async fn seed_default_health_reminders_for(
     ];
     let morning_start = NaiveTime::from_hms_opt(9, 0, 0)
         .ok_or_else(|| "invalid_default_seed_time: morning_start".to_string())?;
-    let lunch_start = NaiveTime::from_hms_opt(12, 0, 0)
-        .ok_or_else(|| "invalid_default_seed_time: lunch_start".to_string())?;
-    let lunch_end = NaiveTime::from_hms_opt(13, 30, 0)
-        .ok_or_else(|| "invalid_default_seed_time: lunch_end".to_string())?;
     let work_end = NaiveTime::from_hms_opt(18, 0, 0)
         .ok_or_else(|| "invalid_default_seed_time: work_end".to_string())?;
     let anchor_date = chrono::NaiveDate::from_ymd_opt(2026, 1, 5)
@@ -1771,12 +1772,8 @@ async fn seed_default_health_reminders_for(
                 let id = format!("default-health-{key}");
                 let mut reminder = NewReminder::new(&id, title, now.saturating_add(index as i64));
                 reminder.description = description.to_string();
-                let active_windows = vec![
-                    ActiveWindow::new(morning_start, lunch_start)
-                        .map_err(|error| format!("invalid_default_seed_window: {error:?}"))?,
-                    ActiveWindow::new(lunch_end, work_end)
-                        .map_err(|error| format!("invalid_default_seed_window: {error:?}"))?,
-                ];
+                let active_windows = vec![ActiveWindow::new(morning_start, work_end)
+                    .map_err(|error| format!("invalid_default_seed_window: {error:?}"))?];
                 let anchor_local = anchor_date
                     .and_hms_opt(9, anchor_minute, 0)
                     .ok_or_else(|| format!("invalid_default_seed_anchor: {key}"))?;
@@ -1917,10 +1914,9 @@ pub fn run() -> Result<(), tauri::Error> {
             let database_path = data_dir.join("takefive.db");
             let store = tauri::async_runtime::block_on(SqliteStore::open(&database_path))
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
-            tauri::async_runtime::block_on(load_or_initialize_reminder_settings(
-                &store,
-                iana_time_zone::get_timezone().ok(),
-            ))
+            let reminder_settings = tauri::async_runtime::block_on(
+                load_or_initialize_reminder_settings(&store, iana_time_zone::get_timezone().ok()),
+            )
             .map_err(std::io::Error::other)?;
             let reminders = ReminderRepository::new(store.clone());
             if let Err(error) = tauri::async_runtime::block_on(initialize_default_autostart(
@@ -1931,6 +1927,9 @@ pub fn run() -> Result<(), tauri::Error> {
                 eprintln!("TakeFive autostart initialization unavailable: {error}");
             }
             let reminder_surface = ReminderSurfaceState::default();
+            reminder_surface
+                .set_display_name(&reminder_settings.app_display_name)
+                .map_err(std::io::Error::other)?;
             app.manage(reminder_surface.clone());
             let scheduler =
                 scheduler_runtime::start(app.handle().clone(), store.clone(), reminder_surface);
@@ -1948,7 +1947,13 @@ pub fn run() -> Result<(), tauri::Error> {
                 eprintln!("TakeFive lifecycle monitor unavailable: {error}");
             }
 
-            let tray_available = match build_tray(app) {
+            if let Err(error) =
+                apply_native_display_name(app.handle(), &reminder_settings.app_display_name)
+            {
+                eprintln!("TakeFive display name sync unavailable: {error}");
+            }
+
+            let tray_available = match build_tray(app, &reminder_settings.app_display_name) {
                 Ok(()) => true,
                 Err(error) => {
                     eprintln!("TakeFive tray unavailable; using foreground mode: {error}");
@@ -2049,12 +2054,45 @@ pub fn run() -> Result<(), tauri::Error> {
     Ok(())
 }
 
-fn build_tray(app: &tauri::App) -> Result<(), tauri::Error> {
-    let open = MenuItem::with_id(app, "open", "Open TakeFive", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit TakeFive", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &quit])?;
+fn create_tray_menu<R: tauri::Runtime, M: Manager<R>>(
+    app: &M,
+    display_name: &str,
+) -> Result<Menu<R>, tauri::Error> {
+    let open = MenuItem::with_id(
+        app,
+        "open",
+        format!("Open {display_name}"),
+        true,
+        None::<&str>,
+    )?;
+    let quit = MenuItem::with_id(
+        app,
+        "quit",
+        format!("Quit {display_name}"),
+        true,
+        None::<&str>,
+    )?;
+    Menu::with_items(app, &[&open, &quit])
+}
+
+fn apply_native_display_name(app: &AppHandle, display_name: &str) -> Result<(), tauri::Error> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.set_title(display_name)?;
+    }
+    if let Some(window) = app.get_webview_window(REMINDER_SURFACE_LABEL) {
+        window.set_title(display_name)?;
+    }
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        tray.set_tooltip(Some(display_name))?;
+        tray.set_menu(Some(create_tray_menu(app, display_name)?))?;
+    }
+    Ok(())
+}
+
+fn build_tray(app: &tauri::App, display_name: &str) -> Result<(), tauri::Error> {
+    let menu = create_tray_menu(app, display_name)?;
     let mut builder = TrayIconBuilder::with_id("main-tray")
-        .tooltip("TakeFive")
+        .tooltip(display_name)
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_main_window(app),
@@ -2074,8 +2112,12 @@ fn show_main_window(app: &AppHandle) {
         return;
     }
 
+    let display_name = app
+        .try_state::<ReminderSurfaceState>()
+        .map(|surface| surface.display_name())
+        .unwrap_or_else(|| DEFAULT_APP_DISPLAY_NAME.to_string());
     if let Ok(window) = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-        .title("TakeFive")
+        .title(display_name)
         .inner_size(1080.0, 760.0)
         .min_inner_size(900.0, 620.0)
         .center()
@@ -2393,7 +2435,11 @@ mod tests {
             assert_eq!(record.rule_type, "aligned_interval");
             let rule: AlignedIntervalRule = serde_json::from_str(&record.rule_config_json).unwrap();
             assert_eq!(rule.active_weekdays().len(), 5);
-            assert_eq!(rule.active_windows().len(), 2);
+            assert_eq!(rule.active_windows().len(), 1);
+            assert_eq!(
+                format_active_window(&rule.active_windows()[0]),
+                "09:00-18:00"
+            );
         }
         let lunch_record = configured
             .iter()

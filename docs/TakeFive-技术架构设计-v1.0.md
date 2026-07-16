@@ -124,7 +124,7 @@ IPC 按现有用途分组如下：
 | 首次启动 | `get_onboarding_status`、`complete_onboarding`、`initialize_default_health_reminders` |
 | 提醒管理 | `list_reminders`、`create_reminder`、`create_one_shot_reminder`、`create_aligned_interval_reminder`、`update_reminder`、`set_reminder_enabled`、`delete_reminder`、`preview_reminder` |
 | Occurrence 动作 | `complete_occurrence`、`skip_occurrence`、`snooze_occurrence`、`mark_occurrence_unhandled` |
-| 暂停与设置 | `get_pause_status`、`pause_all`、`resume_all`、`get_reminder_settings`、`update_reminder_settings` |
+| 暂停与设置 | `get_pause_status`、`pause_all`、`resume_all`、`get_reminder_settings`、`update_reminder_settings`；提醒设置 DTO 包含窗口与托盘共用的 `appDisplayName` |
 | 桌面集成 | `get_autostart_status`、`set_autostart_enabled`、`get_reminder_surface_payload`、`dismiss_reminder_preview` |
 
 修改命令名、字段或错误语义时，必须同步 Rust DTO、前端调用方和测试，并保持已有调用兼容。

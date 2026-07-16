@@ -9,10 +9,12 @@ import {
   Bell,
   Check,
   CheckCircle2,
+  ChevronDown,
   Clock3,
   Coffee,
   Database,
   Download,
+  EyeOff,
   HardDrive,
   Languages,
   LoaderCircle,
@@ -94,6 +96,7 @@ interface OnboardingStatusShape {
 }
 
 interface ReminderSettingsShape {
+  appDisplayName: string;
   autoDismissSeconds: number;
   quietHours: {
     enabled: boolean;
@@ -202,20 +205,16 @@ interface ReminderDraft {
   oneShotLocalDateTime: string;
   intervalMinutes: string;
   anchorLocalDateTime: string;
-  hasActiveWindow: boolean;
-  activeWindowStart: string;
-  activeWindowEnd: string;
-  hasLunchBreak: boolean;
-  lunchBreakStart: string;
-  lunchBreakEnd: string;
 }
 
 const WORKDAYS = ["mon", "tue", "wed", "thu", "fri"];
 const EVERY_DAY = [...WORKDAYS, "sat", "sun"];
 const SURFACE_AUTO_DISMISS_MS = 7_000;
+const DEFAULT_APP_DISPLAY_NAME = "摸个鱼 TakeFive";
 
 function defaultReminderSettings(): ReminderSettingsShape {
   return {
+    appDisplayName: DEFAULT_APP_DISPLAY_NAME,
     autoDismissSeconds: 7,
     quietHours: {
       enabled: true,
@@ -256,12 +255,6 @@ function createDraft(): ReminderDraft {
     oneShotLocalDateTime: localDateTimeAfter(30),
     intervalMinutes: "60",
     anchorLocalDateTime: localDateTimeAt("09:00", timezone),
-    hasActiveWindow: true,
-    activeWindowStart: "09:00",
-    activeWindowEnd: "18:00",
-    hasLunchBreak: true,
-    lunchBreakStart: "12:00",
-    lunchBreakEnd: "13:30",
   };
 }
 
@@ -282,12 +275,6 @@ function createDraftFromReminder(reminder: StoredReminder): ReminderDraft {
     oneShotLocalDateTime: rule.localDateTime ?? fallback.oneShotLocalDateTime,
     intervalMinutes: String(rule.intervalMinutes ?? fallback.intervalMinutes),
     anchorLocalDateTime: rule.anchorLocalDateTime ?? fallback.anchorLocalDateTime,
-    hasActiveWindow: Boolean(rule.activeWindowStart && rule.activeWindowEnd),
-    activeWindowStart: rule.activeWindowStart ?? fallback.activeWindowStart,
-    activeWindowEnd: rule.activeWindowEnd ?? fallback.activeWindowEnd,
-    hasLunchBreak: Boolean(rule.excludedWindowStart && rule.excludedWindowEnd),
-    lunchBreakStart: rule.excludedWindowStart ?? fallback.lunchBreakStart,
-    lunchBreakEnd: rule.excludedWindowEnd ?? fallback.lunchBreakEnd,
   };
 }
 
@@ -386,6 +373,7 @@ function readableError(error: unknown, t: ReturnType<typeof useI18n>["t"]) {
   };
   if (known[message]) return known[message];
   if (message.includes("reminder revision conflict")) return t("revisionConflict");
+  if (message === "app_display_name_out_of_range") return t("appDisplayNameRange");
   if (message === "auto_dismiss_seconds_out_of_range") return t("autoDismissRange");
   if (message === "quiet_hours_start_equals_end") return t("quietHoursSameTime");
   if (message === "invalid_quiet_hours_time") return t("invalidLocalTime");
@@ -405,7 +393,12 @@ function readableError(error: unknown, t: ReturnType<typeof useI18n>["t"]) {
 function TeaLogo({ className = "" }: { className?: string }) {
   return (
     <span className={`tea-logo ${className}`} aria-hidden="true">
-      <Coffee size={20} strokeWidth={2.35} />
+      <svg width="22" height="22" viewBox="10 8 48 48" fill="none">
+        <rect x="21" y="11" width="6" height="13" rx="3" fill="#E7B755" />
+        <rect x="34" y="11" width="6" height="13" rx="3" fill="#E7B755" />
+        <path d="M14 29h32v12c0 7.18-5.82 13-13 13h-6c-7.18 0-13-5.82-13-13V29Z" fill="currentColor" />
+        <path d="M45 33h4a7 7 0 0 1 0 14h-4" stroke="currentColor" strokeWidth="5" strokeLinecap="round" />
+      </svg>
     </span>
   );
 }
@@ -475,14 +468,10 @@ function formatRuleSummary(
   const interval = t("everyMinutes", { value: rule.intervalMinutes ?? "?" });
   let window = t("activeAllDay");
   if (rule.activeWindowStart && rule.activeWindowEnd) {
-    window = rule.excludedWindowStart && rule.excludedWindowEnd
-      ? t("activeWindowLunchSummary", {
-        start: rule.activeWindowStart,
-        end: rule.activeWindowEnd,
-        lunchStart: rule.excludedWindowStart,
-        lunchEnd: rule.excludedWindowEnd,
-      })
-      : t("activeWindowSummary", { start: rule.activeWindowStart, end: rule.activeWindowEnd });
+    window = t("activeWindowSummary", {
+      start: rule.activeWindowStart,
+      end: rule.activeWindowEnd,
+    });
   }
   return `${weekdays} · ${interval} · ${window}`;
 }
@@ -494,12 +483,12 @@ function ReminderSurface() {
   const [dismissing, setDismissing] = useState(false);
   const [error, setError] = useState("");
   const [autoDismissMs, setAutoDismissMs] = useState(SURFACE_AUTO_DISMISS_MS);
+  const [appDisplayName, setAppDisplayName] = useState(DEFAULT_APP_DISPLAY_NAME);
   const dismissingId = useRef<string | null>(null);
 
   const performAction = useCallback(async (
-    command: "complete_occurrence" | "skip_occurrence" | "snooze_occurrence" | "mark_occurrence_unhandled" | "dismiss_reminder_preview",
+    command: "mark_occurrence_unhandled" | "dismiss_reminder_preview",
     occurrenceId: string,
-    arguments_: Record<string, unknown> = {},
   ) => {
     if (dismissingId.current === occurrenceId) return;
     dismissingId.current = occurrenceId;
@@ -508,7 +497,7 @@ function ReminderSurface() {
 
     await new Promise((resolve) => window.setTimeout(resolve, 100));
     try {
-      await invoke(command, { id: occurrenceId, ...arguments_ });
+      await invoke(command, { id: occurrenceId });
     } catch (reason) {
       const message = String(reason);
       if (!message.includes("occurrence_action_conflict") && !message.includes("occurrence_not_found")) {
@@ -526,26 +515,22 @@ function ReminderSurface() {
     )
   ), [performAction]);
 
-  const performReminderAction = useCallback((
-    command: "complete_occurrence" | "skip_occurrence" | "snooze_occurrence",
-    current: ReminderSurfacePayload,
-    arguments_: Record<string, unknown> = {},
-  ) => performAction(
-    current.preview ? "dismiss_reminder_preview" : command,
-    current.occurrenceId,
-    current.preview ? {} : arguments_,
-  ), [performAction]);
-
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
     const refresh = () => invoke<ReminderSettingsShape>("get_reminder_settings", { timezone })
       .then((settings) => {
-        if (!disposed) setAutoDismissMs(settings.autoDismissSeconds * 1_000);
+        if (!disposed) {
+          setAutoDismissMs(settings.autoDismissSeconds * 1_000);
+          setAppDisplayName(settings.appDisplayName || DEFAULT_APP_DISPLAY_NAME);
+        }
       })
       .catch(() => {
-        if (!disposed) setAutoDismissMs(SURFACE_AUTO_DISMISS_MS);
+        if (!disposed) {
+          setAutoDismissMs(SURFACE_AUTO_DISMISS_MS);
+          setAppDisplayName(DEFAULT_APP_DISPLAY_NAME);
+        }
       });
     void refresh();
     void listen("settings-changed", () => {
@@ -640,35 +625,11 @@ function ReminderSurface() {
             <X size={15} />
           </button>
           <div className="surface-meta">
-            <span>{payload.preview ? t("previewLabel") : t("teaReminder")}</span>
+            <span>{payload.preview ? `${appDisplayName} · ${t("previewLabel")}` : appDisplayName}</span>
             <time>{formatDateTime(payload.scheduledAt, locale, t("waitingCalculation"))}</time>
           </div>
           <h1 id="surface-title">{payload.title}</h1>
           <p>{error || localizeSurfaceBody(payload.body, t)}</p>
-          <div className="surface-actions" aria-label={t("reminderActions")}>
-            <button
-              type="button"
-              disabled={dismissing}
-              onClick={() => void performReminderAction("complete_occurrence", payload)}
-            >
-              <Check size={14} />{t("complete")}
-            </button>
-            <button
-              type="button"
-              disabled={dismissing}
-              title={t("snoozeMinutes", { value: 10 })}
-              onClick={() => void performReminderAction("snooze_occurrence", payload, { minutes: 10 })}
-            >
-              <Clock3 size={14} />{t("snooze")}
-            </button>
-            <button
-              type="button"
-              disabled={dismissing}
-              onClick={() => void performReminderAction("skip_occurrence", payload)}
-            >
-              <X size={14} />{t("skip")}
-            </button>
-          </div>
         </section>
       ) : (
         <div className="surface-loading">
@@ -777,35 +738,13 @@ function ReminderEditor({
       const intervalMinutes = Number(draft.intervalMinutes);
       const intervalAnchor = reminder?.rule?.kind === "interval" && reminder.rule.anchorLocalDateTime
         ? reminder.rule.anchorLocalDateTime
-        : localDateTimeAt(
-          draft.hasActiveWindow ? draft.activeWindowStart : localDateTimeAfter(0).slice(11),
-          timezone,
-        );
+        : localDateTimeAt(localDateTimeAfter(0).slice(11), timezone);
       if (!Number.isInteger(intervalMinutes) || intervalMinutes < 1 || intervalMinutes > 1440) {
         setError(t("intervalRange"));
         return;
       }
       if (zonedDateTimeToTimestamp(intervalAnchor, timezone) === null) {
         setError(t("invalidAnchor"));
-        return;
-      }
-      if (
-        draft.hasActiveWindow
-        && (!draft.activeWindowStart || !draft.activeWindowEnd || draft.activeWindowStart === draft.activeWindowEnd)
-      ) {
-        setError(t("windowSame"));
-        return;
-      }
-      if (
-        draft.hasActiveWindow
-        && draft.hasLunchBreak
-        && !(
-          draft.activeWindowStart < draft.lunchBreakStart
-          && draft.lunchBreakStart < draft.lunchBreakEnd
-          && draft.lunchBreakEnd < draft.activeWindowEnd
-        )
-      ) {
-        setError(t("lunchOutsideWindow"));
         return;
       }
       command = "create_aligned_interval_reminder";
@@ -816,10 +755,10 @@ function ReminderEditor({
         anchorLocalDateTime: intervalAnchor,
         timezone,
         weekdays: draft.repeatMode === "workdays" ? WORKDAYS : EVERY_DAY,
-        activeWindowStart: draft.hasActiveWindow ? draft.activeWindowStart : null,
-        activeWindowEnd: draft.hasActiveWindow ? draft.activeWindowEnd : null,
-        excludedWindowStart: draft.hasActiveWindow && draft.hasLunchBreak ? draft.lunchBreakStart : null,
-        excludedWindowEnd: draft.hasActiveWindow && draft.hasLunchBreak ? draft.lunchBreakEnd : null,
+        activeWindowStart: null,
+        activeWindowEnd: null,
+        excludedWindowStart: null,
+        excludedWindowEnd: null,
       };
     }
 
@@ -948,50 +887,6 @@ function ReminderEditor({
                 </label>
               </div>
             </fieldset>
-            <div className="window-toggle full-span">
-              <span>{t("activeWindow")}</span>
-              <Toggle
-                checked={draft.hasActiveWindow}
-                label={t("activeWindow")}
-                onChange={(checked) => update("hasActiveWindow", checked)}
-              />
-            </div>
-            {draft.hasActiveWindow && (
-              <>
-                <div className="time-window full-span">
-                  <label className="field">
-                    <span>{t("start")}</span>
-                    <input type="time" value={draft.activeWindowStart} onChange={(event) => update("activeWindowStart", event.target.value)} />
-                  </label>
-                  <span aria-hidden="true">–</span>
-                  <label className="field">
-                    <span>{t("end")}</span>
-                    <input type="time" value={draft.activeWindowEnd} onChange={(event) => update("activeWindowEnd", event.target.value)} />
-                  </label>
-                </div>
-                <div className="window-toggle full-span">
-                  <span>{t("lunchBreak")}</span>
-                  <Toggle
-                    checked={draft.hasLunchBreak}
-                    label={t("lunchBreak")}
-                    onChange={(checked) => update("hasLunchBreak", checked)}
-                  />
-                </div>
-                {draft.hasLunchBreak && (
-                  <div className="time-window full-span">
-                    <label className="field">
-                      <span>{t("lunchStart")}</span>
-                      <input type="time" value={draft.lunchBreakStart} onChange={(event) => update("lunchBreakStart", event.target.value)} />
-                    </label>
-                    <span aria-hidden="true">–</span>
-                    <label className="field">
-                      <span>{t("lunchEnd")}</span>
-                      <input type="time" value={draft.lunchBreakEnd} onChange={(event) => update("lunchBreakEnd", event.target.value)} />
-                    </label>
-                  </div>
-                )}
-              </>
-            )}
           </>
         )}
 
@@ -1199,6 +1094,10 @@ function SettingsPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [reminderSettings, setReminderSettings] = useState(defaultReminderSettings);
+  const reminderSettingsDraft = useRef(defaultReminderSettings());
+  const savedReminderSettings = useRef(defaultReminderSettings());
+  const reminderSettingsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reminderSettingsSaveInFlight = useRef(false);
 
   const autostartQuery = useQuery({
     queryKey: ["autostart"],
@@ -1246,8 +1145,16 @@ function SettingsPage() {
                 : t("updatesDescription");
 
   useEffect(() => {
-    if (reminderSettingsQuery.data) setReminderSettings(reminderSettingsQuery.data);
+    if (reminderSettingsQuery.data) {
+      reminderSettingsDraft.current = reminderSettingsQuery.data;
+      savedReminderSettings.current = reminderSettingsQuery.data;
+      setReminderSettings(reminderSettingsQuery.data);
+    }
   }, [reminderSettingsQuery.data]);
+
+  useEffect(() => () => {
+    if (reminderSettingsSaveTimer.current) clearTimeout(reminderSettingsSaveTimer.current);
+  }, []);
 
   useEffect(() => {
     if (!isTauriRuntime) {
@@ -1284,35 +1191,87 @@ function SettingsPage() {
       { input: settings },
     ),
     onSuccess: async (settings) => {
+      reminderSettingsSaveInFlight.current = false;
+      reminderSettingsSaveTimer.current = null;
       setError("");
       setMessage(t("reminderSettingsSaved"));
+      reminderSettingsDraft.current = settings;
+      savedReminderSettings.current = settings;
       setReminderSettings(settings);
       await queryClient.invalidateQueries({ queryKey: ["reminder-settings"] });
     },
-    onError: (reason) => setError(readableError(reason, t)),
+    onError: (reason) => {
+      reminderSettingsSaveInFlight.current = false;
+      reminderSettingsSaveTimer.current = null;
+      reminderSettingsDraft.current = savedReminderSettings.current;
+      setReminderSettings(savedReminderSettings.current);
+      setError(readableError(reason, t));
+    },
   });
 
-  const submitReminderSettings = (event: React.FormEvent) => {
-    event.preventDefault();
-    setError("");
+  const stageReminderSettings = (settings: ReminderSettingsShape) => {
+    reminderSettingsDraft.current = settings;
+    setReminderSettings(settings);
+  };
+
+  const reminderSettingsValidationError = (settings: ReminderSettingsShape) => {
+    const displayNameLength = [...settings.appDisplayName.trim()].length;
+    if (displayNameLength < 1 || displayNameLength > 30) {
+      return t("appDisplayNameRange");
+    }
     if (
-      reminderSettings.autoDismissSeconds < 1
-      || reminderSettings.autoDismissSeconds > 60
+      settings.autoDismissSeconds < 1
+      || settings.autoDismissSeconds > 60
     ) {
-      setError(t("autoDismissRange"));
+      return t("autoDismissRange");
+    }
+    if (settings.quietHours.startLocal === settings.quietHours.endLocal) {
+      return t("quietHoursSameTime");
+    }
+    return "";
+  };
+
+  const persistReminderSettings = (settings: ReminderSettingsShape) => {
+    stageReminderSettings(settings);
+    setMessage("");
+    const validationError = reminderSettingsValidationError(settings);
+    setError(validationError);
+    if (validationError) {
       return;
     }
-    if (reminderSettings.quietHours.startLocal === reminderSettings.quietHours.endLocal) {
-      setError(t("quietHoursSameTime"));
-      return;
-    }
+    if (reminderSettingsSaveInFlight.current) return;
+    reminderSettingsSaveInFlight.current = true;
     saveReminderSettings.mutate({
-      ...reminderSettings,
+      ...settings,
       quietHours: {
-        ...reminderSettings.quietHours,
+        ...settings.quietHours,
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
       },
     });
+  };
+
+  const applyReminderSettings = (settings: ReminderSettingsShape) => {
+    if (reminderSettingsSaveTimer.current) {
+      clearTimeout(reminderSettingsSaveTimer.current);
+      reminderSettingsSaveTimer.current = null;
+    }
+    persistReminderSettings(settings);
+  };
+
+  const scheduleReminderSettingsSave = (settings: ReminderSettingsShape) => {
+    stageReminderSettings(settings);
+    setMessage("");
+    const validationError = reminderSettingsValidationError(settings);
+    setError(validationError);
+    if (reminderSettingsSaveTimer.current) clearTimeout(reminderSettingsSaveTimer.current);
+    if (validationError) {
+      reminderSettingsSaveTimer.current = null;
+      return;
+    }
+    reminderSettingsSaveTimer.current = setTimeout(() => {
+      reminderSettingsSaveTimer.current = null;
+      persistReminderSettings(settings);
+    }, 400);
   };
 
   const updateTheme = (next: Partial<ThemeSettingsShape>) => {
@@ -1355,7 +1314,10 @@ function SettingsPage() {
         setNotificationState(granted ? "granted" : "denied");
       }
       if (!granted) throw new Error(t("notificationPermissionOff"));
-      sendNotification({ title: t("appName"), body: t("notificationReady") });
+      sendNotification({
+        title: reminderSettingsDraft.current.appDisplayName,
+        body: t("notificationReady"),
+      });
       setMessage(t("testNotificationSent"));
     } catch (reason) {
       setError(readableError(reason, t));
@@ -1379,110 +1341,7 @@ function SettingsPage() {
         </p>
       )}
 
-      <div className="settings-section appearance-section">
-        <div className="appearance-heading">
-          <div>
-            <h2>{t("appearance")}</h2>
-            <p>{t("appearanceDescription")}</p>
-          </div>
-          <span className="theme-status"><Check size={13} />{t("themeSaved")}</span>
-        </div>
-        <div className="theme-control-grid">
-          <fieldset className="theme-control style-control">
-            <legend>{t("style")}</legend>
-            <div className="theme-option-grid">
-              {styleOptions.map((option) => (
-                <label className={`theme-option ${themeSettings.style === option.value ? "selected" : ""}`} key={option.value}>
-                  <input
-                    type="radio"
-                    name="theme-style"
-                    value={option.value}
-                    checked={themeSettings.style === option.value}
-                    onChange={() => updateTheme({ style: option.value })}
-                  />
-                  <span className={`style-preview style-${option.value}`} aria-hidden="true">
-                    <span />
-                    <i />
-                    <b />
-                  </span>
-                  <strong>{t(option.labelKey)}</strong>
-                </label>
-              ))}
-            </div>
-          </fieldset>
-
-          <fieldset className="theme-control">
-            <legend>{t("accentColor")}</legend>
-            <div className="accent-option-grid">
-              {accentOptions.map((option) => (
-                <label className={`accent-option ${themeSettings.accent === option.value ? "selected" : ""}`} key={option.value}>
-                  <input
-                    type="radio"
-                    name="theme-accent"
-                    value={option.value}
-                    checked={themeSettings.accent === option.value}
-                    onChange={() => updateTheme({ accent: option.value })}
-                  />
-                  <span className={`accent-swatch accent-${option.value}`} aria-hidden="true" />
-                  <span>{t(option.labelKey)}</span>
-                </label>
-              ))}
-            </div>
-          </fieldset>
-
-          <fieldset className="theme-control background-control">
-            <legend>{t("backgroundStyle")}</legend>
-            <div className="background-option-grid">
-              {backgroundOptions.map((option) => (
-                <label className={`background-option background-${option.value} ${themeSettings.background === option.value ? "selected" : ""}`} key={option.value}>
-                  <input
-                    type="radio"
-                    name="theme-background"
-                    value={option.value}
-                    checked={themeSettings.background === option.value}
-                    onChange={() => updateTheme({ background: option.value })}
-                  />
-                  <span aria-hidden="true" />
-                  <strong>{t(option.labelKey)}</strong>
-                </label>
-              ))}
-            </div>
-          </fieldset>
-
-          <div className="theme-preview" aria-hidden="true">
-            <div className="theme-preview-topline"><span /><span /><span /></div>
-            <div className="theme-preview-body">
-              <span className="theme-preview-mark"><Coffee size={15} /></span>
-              <div><b>{t("appName")}</b><small>{t("themePreview")}</small></div>
-              <span className="theme-preview-accent" />
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="settings-section language-section">
-        <h2>{t("language")}</h2>
-        <div className="setting-row language-row">
-          <span className="setting-icon"><Languages size={19} /></span>
-          <div className="setting-copy">
-            <strong>{t("language")}</strong>
-            <span>{t("languageDescription")}</span>
-          </div>
-          <select
-            className="language-select"
-            value={locale}
-            aria-label={t("language")}
-            onChange={(event) => {
-              setLocale(event.target.value as Locale);
-              setMessage("");
-            }}
-          >
-            {localeOptions.map((option) => <option key={option.code} value={option.code}>{option.label}</option>)}
-          </select>
-        </div>
-      </div>
-
-      <div className="settings-section">
+      <div className="settings-section reminder-control-section">
         <h2>{t("notifications")}</h2>
         <div className="setting-row pause-row">
           <span className={`setting-icon ${pause.active ? "paused" : ""}`}><Pause size={19} /></span>
@@ -1518,7 +1377,7 @@ function SettingsPage() {
         </div>
       </div>
 
-      <form className="settings-section reminder-behavior-section" onSubmit={submitReminderSettings}>
+      <div className="settings-section reminder-behavior-section">
         <h2>{t("reminderBehavior")}</h2>
         <div className="setting-row">
           <span className="setting-icon"><Clock3 size={19} /></span>
@@ -1533,12 +1392,17 @@ function SettingsPage() {
               max={60}
               step={1}
               required
+              disabled={reminderSettingsQuery.isLoading || saveReminderSettings.isPending}
               value={reminderSettings.autoDismissSeconds}
               aria-label={t("autoDismiss")}
-              onChange={(event) => setReminderSettings((current) => ({
-                ...current,
+              onChange={(event) => scheduleReminderSettingsSave({
+                ...reminderSettingsDraft.current,
                 autoDismissSeconds: Number(event.target.value),
-              }))}
+              })}
+              onBlur={(event) => applyReminderSettings({
+                ...reminderSettingsDraft.current,
+                autoDismissSeconds: Number(event.currentTarget.value),
+              })}
             />
             <span>{t("secondsUnit")}</span>
           </label>
@@ -1558,10 +1422,10 @@ function SettingsPage() {
             checked={reminderSettings.quietHours.enabled}
             disabled={reminderSettingsQuery.isLoading || saveReminderSettings.isPending}
             label={t("quietHours")}
-            onChange={(enabled) => setReminderSettings((current) => ({
-              ...current,
-              quietHours: { ...current.quietHours, enabled },
-            }))}
+            onChange={(enabled) => applyReminderSettings({
+              ...reminderSettingsDraft.current,
+              quietHours: { ...reminderSettingsDraft.current.quietHours, enabled },
+            })}
           />
           {reminderSettings.quietHours.enabled && (
             <div className="quiet-time-fields">
@@ -1570,11 +1434,22 @@ function SettingsPage() {
                 <input
                   type="time"
                   required
+                  disabled={saveReminderSettings.isPending}
                   value={reminderSettings.quietHours.startLocal}
-                  onChange={(event) => setReminderSettings((current) => ({
-                    ...current,
-                    quietHours: { ...current.quietHours, startLocal: event.target.value },
-                  }))}
+                  onChange={(event) => scheduleReminderSettingsSave({
+                    ...reminderSettingsDraft.current,
+                    quietHours: {
+                      ...reminderSettingsDraft.current.quietHours,
+                      startLocal: event.target.value,
+                    },
+                  })}
+                  onBlur={(event) => applyReminderSettings({
+                    ...reminderSettingsDraft.current,
+                    quietHours: {
+                      ...reminderSettingsDraft.current.quietHours,
+                      startLocal: event.currentTarget.value,
+                    },
+                  })}
                 />
               </label>
               <span aria-hidden="true">-</span>
@@ -1583,32 +1458,94 @@ function SettingsPage() {
                 <input
                   type="time"
                   required
+                  disabled={saveReminderSettings.isPending}
                   value={reminderSettings.quietHours.endLocal}
-                  onChange={(event) => setReminderSettings((current) => ({
-                    ...current,
-                    quietHours: { ...current.quietHours, endLocal: event.target.value },
-                  }))}
+                  onChange={(event) => scheduleReminderSettingsSave({
+                    ...reminderSettingsDraft.current,
+                    quietHours: {
+                      ...reminderSettingsDraft.current.quietHours,
+                      endLocal: event.target.value,
+                    },
+                  })}
+                  onBlur={(event) => applyReminderSettings({
+                    ...reminderSettingsDraft.current,
+                    quietHours: {
+                      ...reminderSettingsDraft.current.quietHours,
+                      endLocal: event.currentTarget.value,
+                    },
+                  })}
                 />
               </label>
             </div>
           )}
         </div>
-        <div className="settings-form-actions">
-          <button
-            className="button primary compact"
-            type="submit"
-            disabled={reminderSettingsQuery.isLoading || saveReminderSettings.isPending}
-          >
-            {saveReminderSettings.isPending
-              ? <LoaderCircle className="spin" size={15} />
-              : <Check size={15} />}
-            {t("saveSettings")}
-          </button>
+      </div>
+
+      <div className="settings-section notification-section">
+        <h2>{t("systemNotifications")}</h2>
+        <div className="setting-row">
+          <span className="setting-icon"><Bell size={19} /></span>
+          <div className="setting-copy">
+            <strong>{t("systemNotifications")}</strong>
+            <span>{t("systemNotificationsDescription")}</span>
+            <span>
+              {notificationState === "granted"
+                ? t("allowed")
+                : notificationState === "checking"
+                  ? t("checking")
+                  : notificationState === "unavailable"
+                    ? t("systemUnavailable")
+                    : t("notAllowed")}
+            </span>
+          </div>
+          <div className="setting-actions">
+            {notificationState === "denied" && (
+              <button className="button secondary compact" type="button" onClick={() => void enableNotifications()}>
+                {t("enableAction")}
+              </button>
+            )}
+            <button
+              className="button secondary compact"
+              type="button"
+              disabled={notificationState === "unavailable" || testingNotification}
+              onClick={() => void testNotification()}
+            >
+              {testingNotification ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}
+              {t("test")}
+            </button>
+          </div>
         </div>
-      </form>
+      </div>
 
       <div className="settings-section">
         <h2>{t("application")}</h2>
+        <div className="setting-row display-name-row">
+          <span className="setting-icon"><EyeOff size={19} /></span>
+          <div className="setting-copy">
+            <strong>{t("appDisplayName")}</strong>
+            <span>{t("appDisplayNameDescription")}</span>
+          </div>
+          <label className="display-name-setting">
+            <input
+              type="text"
+              minLength={1}
+              maxLength={30}
+              required
+              spellCheck={false}
+              disabled={reminderSettingsQuery.isLoading || saveReminderSettings.isPending}
+              value={reminderSettings.appDisplayName}
+              aria-label={t("appDisplayName")}
+              onChange={(event) => scheduleReminderSettingsSave({
+                ...reminderSettingsDraft.current,
+                appDisplayName: event.target.value,
+              })}
+              onBlur={(event) => applyReminderSettings({
+                ...reminderSettingsDraft.current,
+                appDisplayName: event.currentTarget.value,
+              })}
+            />
+          </label>
+        </div>
         <div className="setting-row">
           <span className="setting-icon"><Power size={19} /></span>
           <div className="setting-copy">
@@ -1631,6 +1568,28 @@ function SettingsPage() {
             <span>{t("backgroundTrayDescription")}</span>
           </div>
           <span className="status-dot good" title={t("backgroundRunning")} />
+        </div>
+      </div>
+
+      <div className="settings-section language-section">
+        <h2>{t("language")}</h2>
+        <div className="setting-row language-row">
+          <span className="setting-icon"><Languages size={19} /></span>
+          <div className="setting-copy">
+            <strong>{t("language")}</strong>
+            <span>{t("languageDescription")}</span>
+          </div>
+          <select
+            className="language-select"
+            value={locale}
+            aria-label={t("language")}
+            onChange={(event) => {
+              setLocale(event.target.value as Locale);
+              setMessage("");
+            }}
+          >
+            {localeOptions.map((option) => <option key={option.code} value={option.code}>{option.label}</option>)}
+          </select>
         </div>
       </div>
 
@@ -1726,41 +1685,89 @@ function SettingsPage() {
         </div>
       </div>
 
-      <div className="settings-section notification-section">
-        <h2>{t("systemNotifications")}</h2>
-        <div className="setting-row">
-          <span className="setting-icon"><Bell size={19} /></span>
-          <div className="setting-copy">
-            <strong>{t("systemNotifications")}</strong>
-            <span>{t("systemNotificationsDescription")}</span>
-            <span>
-              {notificationState === "granted"
-                ? t("allowed")
-                : notificationState === "checking"
-                  ? t("checking")
-                  : notificationState === "unavailable"
-                    ? t("systemUnavailable")
-                    : t("notAllowed")}
-            </span>
+      <details className="settings-section appearance-section">
+        <summary className="appearance-heading">
+          <div>
+            <h2>{t("appearance")}</h2>
+            <p>{t("appearanceDescription")}</p>
           </div>
-          <div className="setting-actions">
-            {notificationState === "denied" && (
-              <button className="button secondary compact" type="button" onClick={() => void enableNotifications()}>
-                {t("enableAction")}
-              </button>
-            )}
-            <button
-              className="button secondary compact"
-              type="button"
-              disabled={notificationState === "unavailable" || testingNotification}
-              onClick={() => void testNotification()}
-            >
-              {testingNotification ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}
-              {t("test")}
-            </button>
+          <span className="appearance-summary-meta">
+            <span className="theme-status"><Check size={13} />{t("themeSaved")}</span>
+            <ChevronDown className="appearance-chevron" size={18} aria-hidden="true" />
+          </span>
+        </summary>
+        <div className="theme-control-grid">
+          <fieldset className="theme-control style-control">
+            <legend>{t("style")}</legend>
+            <div className="theme-option-grid">
+              {styleOptions.map((option) => (
+                <label className={`theme-option ${themeSettings.style === option.value ? "selected" : ""}`} key={option.value}>
+                  <input
+                    type="radio"
+                    name="theme-style"
+                    value={option.value}
+                    checked={themeSettings.style === option.value}
+                    onChange={() => updateTheme({ style: option.value })}
+                  />
+                  <span className={`style-preview style-${option.value}`} aria-hidden="true">
+                    <span />
+                    <i />
+                    <b />
+                  </span>
+                  <strong>{t(option.labelKey)}</strong>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
+          <fieldset className="theme-control">
+            <legend>{t("accentColor")}</legend>
+            <div className="accent-option-grid">
+              {accentOptions.map((option) => (
+                <label className={`accent-option ${themeSettings.accent === option.value ? "selected" : ""}`} key={option.value}>
+                  <input
+                    type="radio"
+                    name="theme-accent"
+                    value={option.value}
+                    checked={themeSettings.accent === option.value}
+                    onChange={() => updateTheme({ accent: option.value })}
+                  />
+                  <span className={`accent-swatch accent-${option.value}`} aria-hidden="true" />
+                  <span>{t(option.labelKey)}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
+          <fieldset className="theme-control background-control">
+            <legend>{t("backgroundStyle")}</legend>
+            <div className="background-option-grid">
+              {backgroundOptions.map((option) => (
+                <label className={`background-option background-${option.value} ${themeSettings.background === option.value ? "selected" : ""}`} key={option.value}>
+                  <input
+                    type="radio"
+                    name="theme-background"
+                    value={option.value}
+                    checked={themeSettings.background === option.value}
+                    onChange={() => updateTheme({ background: option.value })}
+                  />
+                  <span aria-hidden="true" />
+                  <strong>{t(option.labelKey)}</strong>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
+          <div className="theme-preview" aria-hidden="true">
+            <div className="theme-preview-topline"><span /><span /><span /></div>
+            <div className="theme-preview-body">
+              <span className="theme-preview-mark"><Coffee size={15} /></span>
+              <div><b>{reminderSettings.appDisplayName}</b><small>{t("themePreview")}</small></div>
+              <span className="theme-preview-accent" />
+            </div>
           </div>
         </div>
-      </div>
+      </details>
     </section>
   );
 }
@@ -1826,6 +1833,14 @@ function MainApplication() {
     queryFn: () => invoke<OnboardingStatusShape>("get_onboarding_status"),
     retry: false,
   });
+  const reminderSettingsQuery = useQuery({
+    queryKey: ["reminder-settings"],
+    queryFn: () => invoke<ReminderSettingsShape>("get_reminder_settings", {
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+    }),
+    retry: false,
+  });
+  const appDisplayName = reminderSettingsQuery.data?.appDisplayName || DEFAULT_APP_DISPLAY_NAME;
 
   useEffect(() => {
     let disposed = false;
@@ -1837,6 +1852,11 @@ function MainApplication() {
       });
       if (disposed) remindersChanged();
       else cleanups.push(remindersChanged);
+      const settingsChanged = await listen("settings-changed", () => {
+        void queryClient.invalidateQueries({ queryKey: ["reminder-settings"] });
+      });
+      if (disposed) settingsChanged();
+      else cleanups.push(settingsChanged);
     };
     void subscribe();
     return () => {
@@ -1862,7 +1882,7 @@ function MainApplication() {
       <header className="topbar">
         <div className="brand-lockup">
           <TeaLogo />
-          <strong>{t("appName")}</strong>
+          <strong>{appDisplayName}</strong>
         </div>
         <nav className="main-tabs" aria-label={t("mainNavigation")}>
           <button

@@ -5,10 +5,12 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 
+use crate::reminder_settings::DEFAULT_APP_DISPLAY_NAME;
+
 pub(crate) const REMINDER_SURFACE_LABEL: &str = "reminder";
 const REMINDER_SURFACE_EVENT: &str = "reminder-surface-updated";
 const REMINDER_SURFACE_WIDTH: f64 = 326.0;
-const REMINDER_SURFACE_HEIGHT: f64 = 194.0;
+const REMINDER_SURFACE_HEIGHT: f64 = 146.0;
 const REMINDER_SURFACE_MARGIN: f64 = 12.0;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -22,10 +24,21 @@ pub(crate) struct ReminderSurfacePayload {
     pub(crate) preview: bool,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct ReminderSurfaceState {
     queue: Arc<RwLock<VecDeque<ReminderSurfacePayload>>>,
     presentation: Arc<Mutex<()>>,
+    display_name: Arc<RwLock<String>>,
+}
+
+impl Default for ReminderSurfaceState {
+    fn default() -> Self {
+        Self {
+            queue: Arc::new(RwLock::new(VecDeque::new())),
+            presentation: Arc::new(Mutex::new(())),
+            display_name: Arc::new(RwLock::new(DEFAULT_APP_DISPLAY_NAME.to_string())),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -36,6 +49,22 @@ enum QueueAdvance {
 }
 
 impl ReminderSurfaceState {
+    pub(crate) fn display_name(&self) -> String {
+        self.display_name
+            .read()
+            .map(|name| name.clone())
+            .unwrap_or_else(|_| DEFAULT_APP_DISPLAY_NAME.to_string())
+    }
+
+    pub(crate) fn set_display_name(&self, display_name: &str) -> Result<(), String> {
+        let mut current = self
+            .display_name
+            .write()
+            .map_err(|_| "reminder_surface_display_name_state_poisoned".to_string())?;
+        display_name.clone_into(&mut current);
+        Ok(())
+    }
+
     pub(crate) fn latest(&self) -> Result<Option<ReminderSurfacePayload>, String> {
         self.queue
             .read()
@@ -104,7 +133,7 @@ impl ReminderSurfaceState {
         })
     }
 
-    fn show_payload(app: &AppHandle, payload: ReminderSurfacePayload) -> Result<(), String> {
+    fn show_payload(&self, app: &AppHandle, payload: ReminderSurfacePayload) -> Result<(), String> {
         let (x, y) = surface_position(app).unwrap_or((24.0, 24.0));
         if let Some(window) = app.get_webview_window(REMINDER_SURFACE_LABEL) {
             window
@@ -130,7 +159,7 @@ impl ReminderSurfaceState {
             REMINDER_SURFACE_LABEL,
             WebviewUrl::App("index.html?surface=reminder".into()),
         )
-        .title("摸个鱼提醒")
+        .title(self.display_name())
         .inner_size(REMINDER_SURFACE_WIDTH, REMINDER_SURFACE_HEIGHT)
         .min_inner_size(REMINDER_SURFACE_WIDTH, REMINDER_SURFACE_HEIGHT)
         .max_inner_size(REMINDER_SURFACE_WIDTH, REMINDER_SURFACE_HEIGHT)
@@ -138,6 +167,7 @@ impl ReminderSurfaceState {
         .maximizable(false)
         .minimizable(false)
         .decorations(false)
+        .shadow(false)
         .always_on_top(true)
         .skip_taskbar(true)
         .focused(false)
@@ -162,7 +192,7 @@ impl ReminderSurfaceState {
             return Ok(());
         }
 
-        if let Err(error) = Self::show_payload(app, payload.clone()) {
+        if let Err(error) = self.show_payload(app, payload.clone()) {
             let _ = self.advance(&payload.occurrence_id);
             return Err(error);
         }
@@ -176,7 +206,7 @@ impl ReminderSurfaceState {
             .map_err(|_| "reminder_surface_presentation_state_poisoned".to_string())?;
         match self.advance(occurrence_id)? {
             QueueAdvance::Unchanged => Ok(()),
-            QueueAdvance::Next(next) => Self::show_payload(app, next),
+            QueueAdvance::Next(next) => self.show_payload(app, next),
             QueueAdvance::Empty => {
                 if let Some(window) = app.get_webview_window(REMINDER_SURFACE_LABEL) {
                     window
@@ -199,7 +229,7 @@ impl ReminderSurfaceState {
             .map_err(|_| "reminder_surface_presentation_state_poisoned".to_string())?;
         match self.advance_preview(occurrence_id)? {
             QueueAdvance::Unchanged => Ok(()),
-            QueueAdvance::Next(next) => Self::show_payload(app, next),
+            QueueAdvance::Next(next) => self.show_payload(app, next),
             QueueAdvance::Empty => {
                 if let Some(window) = app.get_webview_window(REMINDER_SURFACE_LABEL) {
                     window
@@ -331,11 +361,11 @@ mod tests {
     fn surface_is_placed_inside_the_bottom_right_work_area() {
         assert_eq!(
             bottom_right_position(0.0, 0.0, 1920.0, 1040.0),
-            (1582.0, 834.0)
+            (1582.0, 882.0)
         );
         assert_eq!(
             bottom_right_position(-1280.0, 40.0, 1280.0, 984.0),
-            (-338.0, 818.0)
+            (-338.0, 866.0)
         );
     }
 }

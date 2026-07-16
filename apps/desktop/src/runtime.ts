@@ -34,6 +34,7 @@ function writeReminders(reminders: BrowserReminder[]) {
 
 function defaultReminderSettings() {
   return {
+    appDisplayName: "摸个鱼 TakeFive",
     autoDismissSeconds: 7,
     quietHours: {
       enabled: true,
@@ -45,12 +46,18 @@ function defaultReminderSettings() {
 }
 
 function readReminderSettings() {
+  const defaults = defaultReminderSettings();
   try {
-    return JSON.parse(
-      window.localStorage.getItem(REMINDER_SETTINGS_KEY) ?? JSON.stringify(defaultReminderSettings()),
+    const value = JSON.parse(
+      window.localStorage.getItem(REMINDER_SETTINGS_KEY) ?? JSON.stringify(defaults),
     );
+    return {
+      ...defaults,
+      ...value,
+      quietHours: { ...defaults.quietHours, ...value?.quietHours },
+    };
   } catch {
-    return defaultReminderSettings();
+    return defaults;
   }
 }
 
@@ -133,7 +140,7 @@ function browserInvoke<T>(command: string, args?: Record<string, unknown>): T {
       window.localStorage.setItem(REMINDER_PREVIEW_KEY, JSON.stringify(payload));
       const url = new URL(window.location.href);
       url.search = "?surface=reminder";
-      window.open(url, "takefive-reminder-preview", "popup,width=326,height=194");
+      window.open(url, "takefive-reminder-preview", "popup,width=326,height=146");
       return payload as T;
     }
     case "dismiss_reminder_preview":

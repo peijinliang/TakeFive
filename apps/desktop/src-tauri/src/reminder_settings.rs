@@ -7,14 +7,22 @@ use std::str::FromStr;
 
 pub(crate) const REMINDER_SETTINGS_KEY: &str = "reminder_settings.v1";
 pub(crate) const DEFAULT_AUTO_DISMISS_SECONDS: u32 = 7;
+pub(crate) const DEFAULT_APP_DISPLAY_NAME: &str = "摸个鱼 TakeFive";
 const DEFAULT_QUIET_START: &str = "12:00";
 const DEFAULT_QUIET_END: &str = "13:30";
 const MAX_AUTO_DISMISS_SECONDS: u32 = 60;
+const MAX_APP_DISPLAY_NAME_CHARS: usize = 30;
 const MAX_DST_GAP_MINUTES: i64 = 180;
+
+fn default_app_display_name() -> String {
+    DEFAULT_APP_DISPLAY_NAME.to_string()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReminderSettings {
+    #[serde(default = "default_app_display_name")]
+    pub(crate) app_display_name: String,
     pub(crate) auto_dismiss_seconds: u32,
     pub(crate) quiet_hours: QuietHoursSettings,
 }
@@ -32,6 +40,7 @@ pub(crate) struct QuietHoursSettings {
 impl ReminderSettings {
     pub(crate) fn defaults(timezone: Option<String>) -> Self {
         Self {
+            app_display_name: default_app_display_name(),
             auto_dismiss_seconds: DEFAULT_AUTO_DISMISS_SECONDS,
             quiet_hours: QuietHoursSettings {
                 enabled: true,
@@ -54,7 +63,14 @@ impl ReminderSettings {
         settings.validate()
     }
 
-    pub(crate) fn validate(self) -> Result<Self, String> {
+    pub(crate) fn validate(mut self) -> Result<Self, String> {
+        self.app_display_name = self.app_display_name.trim().to_string();
+        if self.app_display_name.is_empty()
+            || self.app_display_name.chars().count() > MAX_APP_DISPLAY_NAME_CHARS
+        {
+            return Err("app_display_name_out_of_range".to_string());
+        }
+
         if !(1..=MAX_AUTO_DISMISS_SECONDS).contains(&self.auto_dismiss_seconds) {
             return Err("auto_dismiss_seconds_out_of_range".to_string());
         }
@@ -152,6 +168,7 @@ mod tests {
     #[test]
     fn defaults_are_seven_seconds_and_lunch_quiet_hours() {
         let settings = ReminderSettings::defaults(Some("UTC".to_string()));
+        assert_eq!(settings.app_display_name, DEFAULT_APP_DISPLAY_NAME);
         assert_eq!(settings.auto_dismiss_seconds, 7);
         assert!(settings.quiet_hours.enabled);
         assert_eq!(settings.quiet_hours.start_local, "12:00");
@@ -166,6 +183,7 @@ mod tests {
     #[test]
     fn crossing_midnight_quiet_hours_use_the_next_local_end() {
         let settings = ReminderSettings {
+            app_display_name: DEFAULT_APP_DISPLAY_NAME.to_string(),
             auto_dismiss_seconds: 7,
             quiet_hours: QuietHoursSettings {
                 enabled: true,
@@ -189,6 +207,7 @@ mod tests {
     #[test]
     fn spring_dst_gap_moves_a_nonexistent_quiet_end_to_the_next_valid_instant() {
         let settings = ReminderSettings {
+            app_display_name: DEFAULT_APP_DISPLAY_NAME.to_string(),
             auto_dismiss_seconds: 7,
             quiet_hours: QuietHoursSettings {
                 enabled: true,
@@ -209,6 +228,7 @@ mod tests {
     #[test]
     fn fall_dst_overlap_uses_the_later_repeated_quiet_end() {
         let settings = ReminderSettings {
+            app_display_name: DEFAULT_APP_DISPLAY_NAME.to_string(),
             auto_dismiss_seconds: 7,
             quiet_hours: QuietHoursSettings {
                 enabled: true,
@@ -246,6 +266,43 @@ mod tests {
         assert_eq!(
             settings.validate().unwrap_err(),
             "invalid_quiet_hours_timezone"
+        );
+    }
+
+    #[test]
+    fn legacy_settings_receive_the_default_display_name() {
+        let settings = ReminderSettings::load(
+            Some(
+                r#"{"autoDismissSeconds":7,"quietHours":{"enabled":true,"startLocal":"12:00","endLocal":"13:30","timezone":"UTC"}}"#,
+            ),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(settings.app_display_name, DEFAULT_APP_DISPLAY_NAME);
+    }
+
+    #[test]
+    fn display_name_is_trimmed_and_validated_by_character_count() {
+        let mut settings = ReminderSettings::defaults(Some("UTC".to_string()));
+        settings.app_display_name = "  Project Notes  ".to_string();
+        assert_eq!(
+            settings.validate().unwrap().app_display_name,
+            "Project Notes"
+        );
+
+        let mut settings = ReminderSettings::defaults(Some("UTC".to_string()));
+        settings.app_display_name = "   ".to_string();
+        assert_eq!(
+            settings.validate().unwrap_err(),
+            "app_display_name_out_of_range"
+        );
+
+        let mut settings = ReminderSettings::defaults(Some("UTC".to_string()));
+        settings.app_display_name = "名".repeat(MAX_APP_DISPLAY_NAME_CHARS + 1);
+        assert_eq!(
+            settings.validate().unwrap_err(),
+            "app_display_name_out_of_range"
         );
     }
 }
